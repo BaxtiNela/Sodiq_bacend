@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Monaco Editor</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #1e1e2e; }
+  #container { width: 100%; height: 100%; }
+  .monaco-editor .margin { background: #1e1e2e !important; }
+</style>
+</head>
+<body>
+<div id="container"></div>
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs/loader.js"></script>
+<script>
+require.config({
+  paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs' }
+});
+
+require(['vs/editor/editor.main'], function () {
+  monaco.editor.defineTheme('catppuccin-mocha', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [
+      { token: 'comment', foreground: '6c7086', fontStyle: 'italic' },
+      { token: 'keyword', foreground: 'cba6f7' },
+      { token: 'string', foreground: 'a6e3a1' },
+      { token: 'number', foreground: 'fab387' },
+      { token: 'type', foreground: '89dceb' },
+      { token: 'class', foreground: 'f9e2af' },
+      { token: 'function', foreground: '89b4fa' },
+      { token: 'variable', foreground: 'cdd6f4' },
+      { token: 'operator', foreground: '89dceb' },
+    ],
+    colors: {
+      'editor.background': '#1e1e2e',
+      'editor.foreground': '#cdd6f4',
+      'editor.lineHighlightBackground': '#2a2a3d',
+      'editor.selectionBackground': '#45475a',
+      'editor.inactiveSelectionBackground': '#313244',
+      'editorLineNumber.foreground': '#45475a',
+      'editorLineNumber.activeForeground': '#cdd6f4',
+      'editorCursor.foreground': '#f5c2e7',
+      'editorWhitespace.foreground': '#313244',
+      'editorIndentGuide.background': '#313244',
+      'editorIndentGuide.activeBackground': '#585b70',
+      'editor.findMatchBackground': '#f9e2af40',
+      'editor.findMatchHighlightBackground': '#f9e2af20',
+      'editorWidget.background': '#181825',
+      'editorWidget.border': '#313244',
+      'editorSuggestWidget.background': '#181825',
+      'editorSuggestWidget.border': '#313244',
+      'editorSuggestWidget.selectedBackground': '#313244',
+      'editorHoverWidget.background': '#181825',
+      'editorHoverWidget.border': '#313244',
+      'scrollbarSlider.background': '#45475a80',
+      'scrollbarSlider.hoverBackground': '#585b70',
+      'scrollbarSlider.activeBackground': '#6c7086',
+      'minimap.background': '#181825',
+    }
+  });
+
+  window.editor = monaco.editor.create(document.getElementById('container'), {
+    value: '// Windows Assistant — Monaco Editor\n// Faylni ochish uchun File Tree dan ikki marta bosing\n',
+    language: 'javascript',
+    theme: 'catppuccin-mocha',
+    fontSize: 13,
+    fontFamily: "'Cascadia Code', 'JetBrains Mono', 'Fira Code', Consolas, monospace",
+    fontLigatures: true,
+    lineNumbers: 'on',
+    minimap: { enabled: true, scale: 1 },
+    scrollBeyondLastLine: false,
+    automaticLayout: true,
+    tabSize: 4,
+    insertSpaces: true,
+    wordWrap: 'off',
+    renderWhitespace: 'selection',
+    bracketPairColorization: { enabled: true },
+    guides: { bracketPairs: true, indentation: true },
+    smoothScrolling: true,
+    cursorBlinking: 'smooth',
+    cursorSmoothCaretAnimation: 'on',
+    renderLineHighlight: 'all',
+    occurrencesHighlight: true,
+    selectionHighlight: true,
+    suggest: { showMethods: true, showFunctions: true, showConstructors: true },
+    quickSuggestions: { other: true, comments: false, strings: false },
+    parameterHints: { enabled: true },
+    hover: { enabled: true, delay: 300 },
+    scrollbar: {
+      vertical: 'auto',
+      horizontal: 'auto',
+      useShadows: false,
+      verticalScrollbarSize: 8,
+      horizontalScrollbarSize: 8,
+    },
+    padding: { top: 8, bottom: 8 },
+  });
+
+  // Expose API to C# via WebMessageReceived
+  window.openFile = function(path, content, language) {
+    var lang = language || detectLanguage(path);
+    var model = monaco.editor.createModel(content, lang, monaco.Uri.file(path));
+    window.editor.setModel(model);
+    window.editor.focus();
+  };
+
+  window.getContent = function() {
+    return window.editor.getValue();
+  };
+
+  window.setLanguage = function(lang) {
+    monaco.editor.setModelLanguage(window.editor.getModel(), lang);
+  };
+
+  window.setContent = function(content) {
+    window.editor.setValue(content);
+  };
+
+  function detectLanguage(path) {
+    if (!path) return 'plaintext';
+    var ext = path.split('.').pop().toLowerCase();
+    var map = {
+      'js': 'javascript', 'ts': 'typescript', 'jsx': 'javascript', 'tsx': 'typescript',
+      'cs': 'csharp', 'py': 'python', 'java': 'java', 'cpp': 'cpp', 'c': 'c',
+      'h': 'cpp', 'hpp': 'cpp', 'rs': 'rust', 'go': 'go', 'rb': 'ruby',
+      'php': 'php', 'html': 'html', 'css': 'css', 'scss': 'scss', 'json': 'json',
+      'xml': 'xml', 'yaml': 'yaml', 'yml': 'yaml', 'md': 'markdown',
+      'sh': 'shell', 'bash': 'shell', 'ps1': 'powershell', 'sql': 'sql',
+      'txt': 'plaintext', 'log': 'plaintext', 'ini': 'ini', 'toml': 'ini',
+    };
+    return map[ext] || 'plaintext';
+  }
+
+  // Notify C# when content changes
+  window.editor.onDidChangeModelContent(function() {
+    if (window.chrome && window.chrome.webview) {
+      window.chrome.webview.postMessage(JSON.stringify({
+        type: 'contentChanged',
+        isDirty: true
+      }));
+    }
+  });
+
+  // Notify C# when cursor position changes
+  window.editor.onDidChangeCursorPosition(function(e) {
+    if (window.chrome && window.chrome.webview) {
+      window.chrome.webview.postMessage(JSON.stringify({
+        type: 'cursorChanged',
+        line: e.position.lineNumber,
+        column: e.position.column
+      }));
+    }
+  });
+
+  // Handle messages from C#
+  if (window.chrome && window.chrome.webview) {
+    window.chrome.webview.addEventListener('message', function(e) {
+      try {
+        var msg = JSON.parse(e.data);
+        if (msg.type === 'openFile') {
+          window.openFile(msg.path, msg.content, msg.language);
+        } else if (msg.type === 'setContent') {
+          window.setContent(msg.content);
+        } else if (msg.type === 'getContent') {
+          window.chrome.webview.postMessage(JSON.stringify({
+            type: 'content',
+            value: window.getContent()
+          }));
+        }
+      } catch(err) {}
+    });
+  }
+});
+</script>
+</body>
+</html>

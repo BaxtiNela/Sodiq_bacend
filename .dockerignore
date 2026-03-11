@@ -1,0 +1,12 @@
+**/.vs
+**/bin
+**/obj
+**/*.user
+src/WA.App
+src/WA.Agent
+src/WA.Native
+publish
+*.md
+.git
+.gitignore
+docker-compose.yml
