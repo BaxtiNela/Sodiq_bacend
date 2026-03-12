@@ -10,89 +10,94 @@ public class ContextBuilderService(AppDbContext db, MemoryBackendService memory)
     /// Yangi xabar uchun to'liq kontekst blokini quradi:
     /// ega profili + tegishli xotiralar + odatlar + oxirgi 20 xabar
     /// </summary>
-    public async Task<string> BuildAsync(string currentMessage, string sessionId)
+    public async Task<string> BuildAsync(string currentMessage, string sessionId, string? userToken = null)
     {
         var sb = new System.Text.StringBuilder();
 
-        // 1. Ega profili
-        var profile = await db.OwnerProfiles.FirstOrDefaultAsync();
+        // 1. Ega profili (qisqa) — token bo'yicha yuklanadi
+        var profile = userToken != null
+            ? await db.OwnerProfiles.FirstOrDefaultAsync(p => p.UserToken == userToken)
+              ?? await db.OwnerProfiles.FirstOrDefaultAsync()
+            : await db.OwnerProfiles.FirstOrDefaultAsync();
+
         if (profile != null)
         {
-            sb.AppendLine("=== EGA PROFILI ===");
-            sb.AppendLine($"Ism: {profile.Name}");
-            sb.AppendLine($"Til: {profile.Language}");
-            sb.AppendLine($"Vaqt mintaqasi: {profile.Timezone}");
-            sb.AppendLine($"Ish soatlari: {profile.WorkingHours}");
-            if (!string.IsNullOrEmpty(profile.Notes))
-                sb.AppendLine($"Qo'shimcha: {profile.Notes}");
-            sb.AppendLine();
+            sb.Append($"[FOYDALANUVCHI: {profile.Name}");
+            if (!string.IsNullOrEmpty(profile.Company))
+                sb.Append($" | {profile.Company}");
+            sb.AppendLine($" | til: {profile.Language}]");
         }
 
-        // 2. Tegishli xotiralar (joriy xabarga mos keluvchilar)
-        var relevant = await memory.SearchAsync(currentMessage);
-        var top = await memory.GetTopAsync(10);
-
-        // Ikkalasini birlashtirish, takrorlanmaslik uchun
-        var combined = relevant.Concat(top)
-            .DistinctBy(m => m.Id)
+        // 2. Doimiy ko'rsatmalar va ish uslubi (har doim yuboriladi — token sarfi kam)
+        var instructions = await db.Memories
+            .Where(m => m.Category == "instruction" || m.Category == "work_style")
             .OrderByDescending(m => m.Importance)
-            .Take(15)
+            .Take(5)
+            .ToListAsync();
+
+        if (instructions.Count > 0)
+        {
+            sb.AppendLine("[KO'RSATMALAR]");
+            foreach (var m in instructions)
+                sb.AppendLine($"- {m.Value}");
+        }
+
+        // 3. Joriy xabarga tegishli xotiralar (semantic search)
+        var relevant = await memory.SearchAsync(currentMessage);
+        var relevantFiltered = relevant
+            .Where(m => m.Category != "instruction" && m.Category != "work_style")
+            .Take(6)
             .ToList();
 
-        if (combined.Count > 0)
+        // Agar tegishli xotira yetarli bo'lmasa, muhim xotiralarni qo'shish
+        if (relevantFiltered.Count < 3)
         {
-            sb.AppendLine("=== XOTIRA (O'RGANILGAN MA'LUMOTLAR) ===");
-            foreach (var m in combined)
-            {
-                sb.AppendLine($"[{m.Category}] {m.Key}: {m.Value}");
-                // Ko'rib chiqilgan xotirani muhimroq qil
-                _ = memory.IncrementAccessAsync(m.Id);
-            }
-            sb.AppendLine();
+            var top = await db.Memories
+                .Where(m => m.Category != "instruction" && m.Category != "work_style")
+                .OrderByDescending(m => m.Importance * 0.6f + m.AccessCount * 0.4f)
+                .Take(5)
+                .ToListAsync();
+            relevantFiltered = relevantFiltered
+                .Concat(top)
+                .DistinctBy(m => m.Id)
+                .Take(6)
+                .ToList();
         }
 
-        // 3. Odatlar
+        if (relevantFiltered.Count > 0)
+        {
+            sb.AppendLine("[XOTIRA]");
+            foreach (var m in relevantFiltered)
+            {
+                var label = m.Category switch
+                {
+                    "project"    => "loyiha",
+                    "fact"       => "fakt",
+                    "habit"      => "odat",
+                    "preference" => "afzallik",
+                    "success"    => "✓",
+                    "failure"    => "✗",
+                    _            => m.Category
+                };
+                sb.AppendLine($"[{label}] {m.Key}: {m.Value}");
+                _ = memory.IncrementAccessAsync(m.Id);
+            }
+        }
+
+        // 4. Eng ko'p ishlatiladigan odatlar (qisqa)
         var habits = await db.Habits
             .OrderByDescending(h => h.Frequency)
-            .Take(5)
+            .Take(3)
             .ToListAsync();
 
         if (habits.Count > 0)
         {
-            sb.AppendLine("=== EGA ODATLARI ===");
-            foreach (var h in habits)
-                sb.AppendLine($"- {h.Pattern} (x{h.Frequency})");
-            sb.AppendLine();
+            sb.Append("[ODATLAR] ");
+            sb.AppendLine(string.Join(" | ", habits.Select(h => h.Pattern)));
         }
 
-        // 4. Joriy sessiya tarixi (oxirgi 20 xabar)
-        var conv = await db.Conversations
-            .Include(c => c.Messages)
-            .FirstOrDefaultAsync(c => c.SessionId == sessionId);
-
-        if (conv?.Messages.Count > 0)
-        {
-            var recent = conv.Messages
-                .OrderBy(m => m.CreatedAt)
-                .TakeLast(20)
-                .ToList();
-
-            sb.AppendLine("=== JORIY SUHBAT TARIXI ===");
-            foreach (var msg in recent)
-            {
-                var prefix = msg.Role switch
-                {
-                    "user" => "Foydalanuvchi",
-                    "assistant" => "Assistent",
-                    "tool" => $"Tool ({msg.ToolName})",
-                    _ => msg.Role
-                };
-                var content = msg.Content.Length > 300
-                    ? msg.Content[..300] + "..."
-                    : msg.Content;
-                sb.AppendLine($"{prefix}: {content}");
-            }
-        }
+        // NOT: Suhbat tarixi bu yerda YUBORILMAYDI —
+        // Hub messages array orqali LLM ga to'g'ridan-to'g'ri uzatiladi (dubliklashni oldini olish)
 
         return sb.ToString().Trim();
     }

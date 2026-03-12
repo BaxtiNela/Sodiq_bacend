@@ -87,6 +87,34 @@ public class LearningService(
         }
     }
 
+    /// <summary>
+    /// Eski xabarlarni o'chiradi — faqat so'nggi 6 ta saqlanadi.
+    /// Muhim bilimlar Memories va Habits jadvallarida saqlanadi.
+    /// </summary>
+    public async Task PruneOldMessagesAsync(int conversationId, CancellationToken ct = default)
+    {
+        try
+        {
+            var allMsgs = await db.Messages
+                .Where(m => m.ConversationId == conversationId)
+                .OrderBy(m => m.CreatedAt)
+                .ToListAsync(ct);
+
+            // So'nggi 6 tadan ortiqlarini o'chirish
+            if (allMsgs.Count > 6)
+            {
+                var toDelete = allMsgs[..^6];
+                db.Messages.RemoveRange(toDelete);
+                await db.SaveChangesAsync(ct);
+                logger.LogInformation("Pruned {N} old messages from conv {Id}", toDelete.Count, conversationId);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("PruneOldMessages failed: {Msg}", ex.Message);
+        }
+    }
+
     private async Task TryUpdateProfileAsync(string key, string value)
     {
         var profile = await db.OwnerProfiles.FirstOrDefaultAsync();

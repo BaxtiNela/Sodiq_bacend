@@ -4,7 +4,16 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <Platforms>x64</Platforms>
+    <UseWPF>true</UseWPF>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Using Include="System.IO"/>
+    <Using Include="System.IO.Compression"/>
+    <Using Include="System.Net.Http"/>
+    <Using Include="System.Text"/>
+    <Using Include="System.Text.RegularExpressions"/>
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.11" />

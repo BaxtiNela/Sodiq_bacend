@@ -6,7 +6,8 @@
         MinHeight="600" MinWidth="860"
         WindowStyle="None" AllowsTransparency="True"
         Background="Transparent" ResizeMode="CanResize"
-        AllowDrop="True" Drop="Window_Drop" DragOver="Window_DragOver">
+        AllowDrop="True" Drop="Window_Drop" DragOver="Window_DragOver"
+        PreviewKeyDown="Window_PreviewKeyDown">
 
     <Window.Resources>
         <Style x:Key="TitleBtn" TargetType="Button" BasedOn="{StaticResource Btn.Ghost}">
@@ -50,6 +51,8 @@
             <Grid.RowDefinitions>
                 <RowDefinition Height="36"/>
                 <RowDefinition Height="*"/>
+                <RowDefinition x:Name="TerminalSplitterRow" Height="0"/>
+                <RowDefinition x:Name="TerminalRow" Height="0"/>
                 <RowDefinition Height="22"/>
             </Grid.RowDefinitions>
 
@@ -100,6 +103,10 @@
                                 Width="32" Height="28" FontSize="14" Margin="0,0,6,0"
                                 ToolTip="Yangi sessiya"
                                 Click="NewSession_Click"/>
+                        <Button Style="{StaticResource Btn.Ghost}" Content="🗑"
+                                Width="32" Height="28" FontSize="13" Margin="0,0,6,0"
+                                ToolTip="Suhbat tarixini tozalash (xotira saqlanadi)"
+                                Click="ClearHistory_Click"/>
                         <Button Style="{StaticResource TitleBtn}" Content="─" Click="Minimize_Click"/>
                         <Button Style="{StaticResource TitleBtn}" Content="□" Click="Maximize_Click"/>
                         <Button Style="{StaticResource TitleBtn}" Content="✕" Click="Close_Click"/>
@@ -137,6 +144,12 @@
                                     Width="36" Height="36" Margin="5,2"
                                     ToolTip="Suhbat tarixi" Click="ActHistory_Click">
                                 <TextBlock Text="💬" FontSize="15"/>
+                            </Button>
+                            <Button x:Name="ActTerminalBtn" Style="{StaticResource Btn.Ghost}"
+                                    Width="36" Height="36" Margin="5,2"
+                                    ToolTip="Terminal (Ctrl+`)" Click="ActTerminal_Click">
+                                <TextBlock Text=">_" FontFamily="Cascadia Code, Consolas"
+                                           FontSize="12" Foreground="#4ec9b0"/>
                             </Button>
                         </StackPanel>
                         <Button VerticalAlignment="Bottom" Style="{StaticResource Btn.Ghost}"
@@ -324,36 +337,22 @@
                                 <RowDefinition Height="Auto"/>  <!-- buttons -->
                             </Grid.RowDefinitions>
 
-                            <!-- Context chip: selected file/folder from tree -->
-                            <Border x:Name="ContextChip" Grid.Row="0"
-                                    Visibility="Collapsed"
-                                    Background="#1e2040" CornerRadius="4"
-                                    Padding="8,4" Margin="0,0,0,6">
-                                <Grid>
-                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                        <TextBlock Text="📎 " FontSize="11"
-                                                   Foreground="#89b4fa" VerticalAlignment="Center"/>
-                                        <TextBlock x:Name="ContextChipLabel"
-                                                   FontSize="11" Foreground="#89b4fa"
-                                                   VerticalAlignment="Center"
-                                                   MaxWidth="200"
-                                                   TextTrimming="CharacterEllipsis"/>
-                                        <!-- Taxlil button (papka tanlanganda) -->
-                                        <Button x:Name="AnalyzeBtn"
-                                                Content="📊 Taxlil" Height="22" Padding="8,0"
-                                                FontSize="10" Margin="8,0,0,0"
-                                                Background="#2a3060" Foreground="#89b4fa"
-                                                BorderThickness="0" Cursor="Hand"
-                                                Visibility="Collapsed"
-                                                Click="AnalyzeProject_Click"/>
-                                    </StackPanel>
-                                    <Button HorizontalAlignment="Right" Content="✕"
-                                            Width="18" Height="18" FontSize="8" Padding="0"
-                                            Background="Transparent" BorderThickness="0"
-                                            Foreground="#6c7086" Cursor="Hand"
-                                            Click="ClearContext_Click"/>
-                                </Grid>
-                            </Border>
+                            <!-- Attached files chips (multi-file context) -->
+                            <ScrollViewer x:Name="AttachedFilesScroll" Grid.Row="0"
+                                          HorizontalScrollBarVisibility="Auto"
+                                          VerticalScrollBarVisibility="Disabled"
+                                          Visibility="Collapsed"
+                                          Margin="0,0,0,6">
+                                <StackPanel x:Name="AttachedFilesPanel" Orientation="Horizontal">
+                                    <Button x:Name="AnalyzeBtn"
+                                            Content="📊 Taxlil" Height="22" Padding="8,0"
+                                            FontSize="10" Margin="0,0,4,0"
+                                            Background="#2a3060" Foreground="#89b4fa"
+                                            BorderThickness="0" Cursor="Hand"
+                                            Visibility="Collapsed"
+                                            Click="AnalyzeProject_Click"/>
+                                </StackPanel>
+                            </ScrollViewer>
 
                             <!-- Chat Input -->
                             <TextBox x:Name="ChatInput" Grid.Row="1"
@@ -454,8 +453,83 @@
                 </Grid>
             </Grid>
 
+            <!-- ═══ TERMINAL SPLITTER ═══ -->
+            <GridSplitter x:Name="TerminalSplitter" Grid.Row="2"
+                          Height="4" HorizontalAlignment="Stretch"
+                          Background="{StaticResource Brush.Border}"
+                          Visibility="Collapsed" Cursor="SizeNS"/>
+
+            <!-- ═══ TERMINAL PANEL ═══ -->
+            <Grid x:Name="TerminalPanel" Grid.Row="3" Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="30"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="32"/>
+                </Grid.RowDefinitions>
+
+                <!-- Terminal Header -->
+                <Border Grid.Row="0" Background="#181825"
+                        BorderBrush="{StaticResource Brush.Border}" BorderThickness="0,1,0,1">
+                    <Grid Margin="8,0">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock Text=">_" FontFamily="Cascadia Code, Consolas" FontSize="11"
+                                       Foreground="#4ec9b0" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <TextBlock Text="PowerShell" FontSize="11" FontWeight="SemiBold"
+                                       Foreground="{StaticResource Brush.Text.Muted}" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="TerminalCwdLabel" FontSize="10"
+                                       Foreground="#6c7086" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                            <Button Style="{StaticResource Btn.Ghost}" Content="🗑" Width="26" Height="26"
+                                    FontSize="11" ToolTip="Terminalni tozalash" Click="ClearTerminal_Click"/>
+                            <Button Style="{StaticResource Btn.Ghost}" Content="✕" Width="26" Height="26"
+                                    FontSize="10" ToolTip="Yopish" Click="CloseTerminal_Click"/>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <!-- Terminal Output -->
+                <ScrollViewer x:Name="TerminalScroll" Grid.Row="1"
+                              Background="#0d1117" Padding="0"
+                              HorizontalScrollBarVisibility="Auto"
+                              VerticalScrollBarVisibility="Auto">
+                    <RichTextBox x:Name="TerminalOutput"
+                                 Background="Transparent" IsReadOnly="True"
+                                 FontFamily="Cascadia Code, Consolas" FontSize="13"
+                                 Foreground="#d4d4d4" BorderThickness="0"
+                                 Padding="8,4,8,4"
+                                 IsDocumentEnabled="True"
+                                 VerticalScrollBarVisibility="Disabled"
+                                 HorizontalScrollBarVisibility="Disabled">
+                        <RichTextBox.Document>
+                            <FlowDocument LineHeight="18" PageWidth="4000"/>
+                        </RichTextBox.Document>
+                    </RichTextBox>
+                </ScrollViewer>
+
+                <!-- Terminal Input -->
+                <Border Grid.Row="2" Background="#0d1117"
+                        BorderBrush="{StaticResource Brush.Border}" BorderThickness="0,1,0,0">
+                    <Grid Margin="8,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="TerminalPrompt" Text="PS &gt; "
+                                   FontFamily="Cascadia Code, Consolas" FontSize="13"
+                                   Foreground="#4ec9b0" VerticalAlignment="Center"/>
+                        <TextBox x:Name="TerminalInput" Grid.Column="1"
+                                 Background="Transparent" BorderThickness="0"
+                                 FontFamily="Cascadia Code, Consolas" FontSize="13"
+                                 Foreground="#d4d4d4" CaretBrush="#d4d4d4"
+                                 VerticalAlignment="Center"
+                                 KeyDown="TerminalInput_KeyDown"/>
+                    </Grid>
+                </Border>
+            </Grid>
+
             <!-- ═══ STATUS BAR ═══ -->
-            <Border Grid.Row="2" Background="{StaticResource Brush.Accent.Blue}"
+            <Border Grid.Row="4" Background="{StaticResource Brush.Accent.Blue}"
                     CornerRadius="0,0,10,10">
                 <Grid Margin="12,0">
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -467,6 +541,65 @@
                     </StackPanel>
                 </Grid>
             </Border>
+            <!-- ═══ RO'YXATDAN O'TISH OVERLAY ═══ -->
+            <Grid x:Name="RegisterOverlay" Grid.RowSpan="5"
+                  Background="#CC000000" Visibility="Collapsed"
+                  Panel.ZIndex="100">
+                <Border Background="#1e1e2e"
+                        BorderBrush="#45475a" BorderThickness="1"
+                        CornerRadius="12" Padding="28,24"
+                        Width="380" VerticalAlignment="Center"
+                        HorizontalAlignment="Center">
+                    <Border.Effect>
+                        <DropShadowEffect BlurRadius="30" ShadowDepth="4" Opacity="0.8" Color="#000000"/>
+                    </Border.Effect>
+                    <StackPanel>
+                        <!-- Logo + title -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                            <TextBlock Text="✦" FontSize="22" Foreground="#89b4fa"
+                                       VerticalAlignment="Center" Margin="0,0,8,0"/>
+                            <TextBlock Text="Sodiq" FontSize="22" FontWeight="Bold"
+                                       Foreground="#cdd6f4" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <TextBlock Text="Tanishaylik — ma'lumotlaringiz saqlanadi"
+                                   Foreground="#6c7086" FontSize="12" Margin="0,0,0,20"/>
+
+                        <!-- Ism -->
+                        <TextBlock Text="Ismingiz" Foreground="#cdd6f4" FontSize="12"
+                                   FontWeight="SemiBold" Margin="0,0,0,6"/>
+                        <TextBox x:Name="RegNameInput"
+                                 Height="36" FontSize="13"
+                                 Background="#181825" Foreground="#cdd6f4"
+                                 BorderBrush="#45475a" BorderThickness="1"
+                                 Padding="10,0" Margin="0,0,0,14"
+                                 KeyDown="RegInput_KeyDown"/>
+
+                        <!-- Kompaniya -->
+                        <TextBlock Text="Kompaniya / tashkilot (ixtiyoriy)"
+                                   Foreground="#cdd6f4" FontSize="12"
+                                   FontWeight="SemiBold" Margin="0,0,0,6"/>
+                        <TextBox x:Name="RegCompanyInput"
+                                 Height="36" FontSize="13"
+                                 Background="#181825" Foreground="#cdd6f4"
+                                 BorderBrush="#45475a" BorderThickness="1"
+                                 Padding="10,0" Margin="0,0,0,22"
+                                 KeyDown="RegInput_KeyDown"/>
+
+                        <!-- Saqlash -->
+                        <Button x:Name="RegSaveBtn"
+                                Content="Boshlash →"
+                                Height="38" FontSize="13" FontWeight="SemiBold"
+                                Background="#3a5cad" Foreground="White"
+                                BorderThickness="0" Cursor="Hand"
+                                Click="Register_Click"/>
+
+                        <TextBlock x:Name="RegStatusText"
+                                   Text="" Foreground="#f38ba8" FontSize="11"
+                                   Margin="0,8,0,0" TextWrapping="Wrap"/>
+                    </StackPanel>
+                </Border>
+            </Grid>
+
         </Grid>
     </Border>
 </Window>

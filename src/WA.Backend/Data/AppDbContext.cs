@@ -36,7 +36,11 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             e.HasIndex(x => x.Category);
         });
 
-        b.Entity<OwnerProfile>(e => e.HasKey(x => x.Id));
+        b.Entity<OwnerProfile>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.HasIndex(x => x.UserToken);
+        });
         b.Entity<Habit>(e => e.HasKey(x => x.Id));
     }
 }

@@ -19,7 +19,10 @@ public partial class MainWindow : Window
     private readonly MemoryService _memory;
     private readonly LocalChatStore _chatStore;
     private readonly ApiKeyStore _apiKeyStore;
+    private readonly UserProfileStore _userProfileStore;
     private readonly ExternalApiClient _extClient = new();
+
+    private string? _userToken; // Persistent user token
 
     private HubConnection? _hub;
     private string _sessionId = GenerateSessionId();
@@ -32,8 +35,13 @@ public partial class MainWindow : Window
     private ChatBubble? _streamBubble;
     private readonly System.Text.StringBuilder _streamBuffer = new();
 
-    // Fayl daraxti tanlangan yo'l (context uchun)
-    private string? _selectedTreePath;
+    // Biriktirilgan fayllar ro'yxati (multi-file context uchun)
+    private readonly List<string> _attachedFiles = new();
+
+    // Integrated terminal
+    private System.Diagnostics.Process? _terminalProcess;
+    private readonly List<string> _cmdHistory = new();
+    private int _cmdHistoryIdx = -1;
 
     // Sessiya cache: id → xabarlar ro'yxati (tez almashtirish uchun)
     private readonly Dictionary<string, List<(MessageRole Role, string Text, string? Model)>> _sessionCache = new();
@@ -49,10 +57,11 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        _memory      = new MemoryService(DataDir);
-        _executor    = new ToolExecutor(_memory);
-        _chatStore   = new LocalChatStore(DataDir);
-        _apiKeyStore = new ApiKeyStore(DataDir);
+        _memory           = new MemoryService(DataDir);
+        _executor         = new ToolExecutor(_memory);
+        _chatStore        = new LocalChatStore(DataDir);
+        _apiKeyStore      = new ApiKeyStore(DataDir);
+        _userProfileStore = new UserProfileStore(DataDir);
         Loaded  += OnLoaded;
         Closing += OnClosing;
     }
@@ -77,6 +86,13 @@ public partial class MainWindow : Window
 
         await ConnectToBackendAsync();
 
+        // Foydalanuvchi ro'yxatdan o'tganmi?
+        var savedProfile = _userProfileStore.Load();
+        if (savedProfile != null)
+            _userToken = savedProfile.Token;
+        else
+            RegisterOverlay.Visibility = Visibility.Visible;
+
         var timer = new System.Windows.Threading.DispatcherTimer
             { Interval = TimeSpan.FromSeconds(30) };
         timer.Tick += (_, _) => MemUsage.Text = $"{GC.GetTotalMemory(false) / 1024 / 1024} MB";
@@ -86,6 +102,8 @@ public partial class MainWindow : Window
     private async void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
         if (_hub != null) await _hub.DisposeAsync();
+        try { _terminalProcess?.Kill(entireProcessTree: true); } catch { }
+        _terminalProcess?.Dispose();
     }
 
     // ═══════════════════════════════════════════
@@ -162,6 +180,9 @@ public partial class MainWindow : Window
 
                 actBubble?.SetDone(result, ok);
 
+                // Terminal mirroring — agent command output → terminal panel
+                await Dispatcher.InvokeAsync(() => MirrorToolToTerminal(toolName, argsJson, result));
+
                 // 4. write_file muvaffaqiyatli bo'lsa — editorda yangilash + qatorlarni belgilash
                 if (toolName == "write_file" && ok)
                 {
@@ -188,6 +209,8 @@ public partial class MainWindow : Window
                     AddMessage(MessageRole.System, $"❌  {err}");
                     SetBusy(false);
                 }));
+
+            _hub.On<string>("HistoryCleared", _ => { /* UI already cleared in ClearHistory_Click */ });
 
             _hub.Reconnecting += _ =>
             {
@@ -302,7 +325,7 @@ public partial class MainWindow : Window
 
         try
         {
-            await _hub.InvokeAsync("SendMessage", _sessionId, backendText, _currentModel);
+            await _hub.InvokeAsync("SendMessage", _sessionId, backendText, _currentModel, _userToken);
         }
         catch (Exception ex)
         {
@@ -313,27 +336,25 @@ public partial class MainWindow : Window
 
     private string BuildMessageWithContext(string userText)
     {
-        if (string.IsNullOrEmpty(_selectedTreePath)) return userText;
-
-        string ctx;
-        if (File.Exists(_selectedTreePath))
+        if (_attachedFiles.Count == 0) return userText;
+        var sb = new System.Text.StringBuilder();
+        foreach (var path in _attachedFiles)
         {
-            try
+            if (File.Exists(path))
             {
-                var ext     = Path.GetExtension(_selectedTreePath).TrimStart('.');
-                var content = File.ReadAllText(_selectedTreePath);
-                if (content.Length > 12000) content = content[..12000] + "\n... (qisqartirildi)";
-                ctx = $"[Fayl: {_selectedTreePath}]\n```{ext}\n{content}\n```\n\n";
+                try
+                {
+                    var ext     = Path.GetExtension(path).TrimStart('.');
+                    var content = File.ReadAllText(path);
+                    if (content.Length > 8000) content = content[..8000] + "\n... (qisqartirildi)";
+                    sb.AppendLine($"[Fayl: {path}]\n```{ext}\n{content}\n```\n");
+                }
+                catch { sb.AppendLine($"[Fayl: {path}] (o'qib bo'lmadi)\n"); }
             }
-            catch { ctx = $"[Fayl: {_selectedTreePath}]\n\n"; }
+            else if (Directory.Exists(path))
+                sb.AppendLine(BuildProjectContext(path));
         }
-        else if (Directory.Exists(_selectedTreePath))
-        {
-            ctx = BuildProjectContext(_selectedTreePath);
-        }
-        else return userText;
-
-        return ctx + userText;
+        return sb + userText;
     }
 
     // Loyiha kontekstini yaratish: dir tree + asosiy fayllar
@@ -477,6 +498,9 @@ public partial class MainWindow : Window
     {
         if (_streamBubble == null)
             AddMessage(MessageRole.Assistant, content, _currentModel);
+        else
+            // Streaming bo'ldi — AddMessage chaqirilmadi, lekin saqlaymiz
+            _chatStore.SaveMessage(_sessionId, "assistant", content, _currentModel);
         _streamBubble = null;
         _streamBuffer.Clear();
         SetBusy(false);
@@ -778,7 +802,7 @@ public partial class MainWindow : Window
         FileTree.Items.Clear();
         try
         {
-            var root = CreateTreeNode(rootPath, expand: true);
+            var root = CreateTreeNode(rootPath, expand: false);
             FileTree.Items.Add(root);
         }
         catch { }
@@ -831,17 +855,13 @@ public partial class MainWindow : Window
             OpenFileInEditor(path);
     }
 
-    // Fayl/papka tanlanganda context chipni ko'rsat
+    // Fayl/papka tanlanganda chip qo'shish
     private void FileTree_SelectedItemChanged(object sender,
         RoutedPropertyChangedEventArgs<object> e)
     {
         if (e.NewValue is TreeViewItem { Tag: string path })
         {
-            _selectedTreePath     = path;
-            var label             = Path.GetFileName(path);
-            ContextChipLabel.Text = string.IsNullOrEmpty(label) ? path : label;
-            ContextChip.Visibility = Visibility.Visible;
-            // Faqat papka uchun "Taxlil" tugmasini ko'rsat
+            AttachFile(path);
             AnalyzeBtn.Visibility = Directory.Exists(path)
                 ? Visibility.Visible : Visibility.Collapsed;
         }
@@ -849,15 +869,227 @@ public partial class MainWindow : Window
 
     private void ClearContext_Click(object sender, RoutedEventArgs e)
     {
-        _selectedTreePath      = null;
-        ContextChip.Visibility = Visibility.Collapsed;
-        AnalyzeBtn.Visibility  = Visibility.Collapsed;
+        _attachedFiles.Clear();
+        AttachedFilesPanel.Children.Clear();
+        // AnalyzeBtn belongs to AttachedFilesPanel, re-add it
+        AttachedFilesPanel.Children.Add(AnalyzeBtn);
+        AttachedFilesScroll.Visibility = Visibility.Collapsed;
+        AnalyzeBtn.Visibility          = Visibility.Collapsed;
+    }
+
+    private void AttachFile(string path)
+    {
+        if (_attachedFiles.Contains(path) || _attachedFiles.Count >= 5) return;
+        _attachedFiles.Add(path);
+        AddFileChip(path);
+    }
+
+    private void RemoveAttachment(string path)
+    {
+        _attachedFiles.Remove(path);
+        var chip = AttachedFilesPanel.Children.OfType<Border>()
+            .FirstOrDefault(b => b.Tag?.ToString() == path);
+        if (chip != null) AttachedFilesPanel.Children.Remove(chip);
+        AttachedFilesScroll.Visibility = _attachedFiles.Count > 0
+            ? Visibility.Visible : Visibility.Collapsed;
+        if (_attachedFiles.Count == 0)
+            AnalyzeBtn.Visibility = Visibility.Collapsed;
+    }
+
+    private void AddFileChip(string path)
+    {
+        var label = Path.GetFileName(path);
+        if (string.IsNullOrEmpty(label)) label = path;
+
+        var chip = new Border
+        {
+            Tag           = path,
+            Background    = new SolidColorBrush(Color.FromRgb(0x1e, 0x20, 0x40)),
+            CornerRadius  = new CornerRadius(4),
+            Padding       = new Thickness(8, 4, 4, 4),
+            Margin        = new Thickness(0, 0, 4, 0)
+        };
+        var sp = new StackPanel { Orientation = Orientation.Horizontal };
+        sp.Children.Add(new TextBlock
+        {
+            Text              = "📎 " + label,
+            FontSize          = 11,
+            Foreground        = new SolidColorBrush(Color.FromRgb(0x89, 0xb4, 0xfa)),
+            MaxWidth          = 150,
+            TextTrimming      = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        var btn = new Button
+        {
+            Content         = "✕",
+            Width           = 16,
+            Height          = 16,
+            FontSize        = 8,
+            Padding         = new Thickness(0),
+            Background      = Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            Foreground      = new SolidColorBrush(Color.FromRgb(0x6c, 0x70, 0x86)),
+            Cursor          = Cursors.Hand,
+            Margin          = new Thickness(4, 0, 0, 0)
+        };
+        btn.Click += (_, _) => RemoveAttachment(path);
+        sp.Children.Add(btn);
+        chip.Child = sp;
+        AttachedFilesPanel.Children.Add(chip);
+        AttachedFilesScroll.Visibility = Visibility.Visible;
+    }
+
+    // ═══════════════════════════════════════════
+    // INTEGRATED TERMINAL
+    // ═══════════════════════════════════════════
+
+    private void ActTerminal_Click(object sender, RoutedEventArgs e) => ToggleTerminal();
+
+    private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.OemTilde && Keyboard.Modifiers == ModifierKeys.Control)
+        {
+            ToggleTerminal();
+            e.Handled = true;
+        }
+    }
+
+    private void ToggleTerminal()
+    {
+        if (TerminalPanel.Visibility == Visibility.Visible)
+        {
+            TerminalPanel.Visibility    = Visibility.Collapsed;
+            TerminalSplitter.Visibility = Visibility.Collapsed;
+            TerminalSplitterRow.Height  = new GridLength(0);
+            TerminalRow.Height          = new GridLength(0);
+        }
+        else
+        {
+            TerminalPanel.Visibility    = Visibility.Visible;
+            TerminalSplitter.Visibility = Visibility.Visible;
+            TerminalSplitterRow.Height  = new GridLength(4);
+            TerminalRow.Height          = new GridLength(220);
+            if (_terminalProcess == null || _terminalProcess.HasExited)
+                StartTerminal();
+            Dispatcher.InvokeAsync(() => TerminalInput.Focus());
+        }
+    }
+
+    private void StartTerminal()
+    {
+        _terminalProcess?.Dispose();
+        _terminalProcess = new System.Diagnostics.Process
+        {
+            StartInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName               = "powershell.exe",
+                Arguments              = "-NoLogo -NoExit -ExecutionPolicy Bypass",
+                UseShellExecute        = false,
+                RedirectStandardInput  = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError  = true,
+                CreateNoWindow         = true,
+                StandardOutputEncoding = System.Text.Encoding.UTF8,
+                StandardErrorEncoding  = System.Text.Encoding.UTF8,
+                WorkingDirectory       = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            },
+            EnableRaisingEvents = true
+        };
+
+        _terminalProcess.OutputDataReceived += (_, e) =>
+        {
+            if (e.Data != null)
+                Dispatcher.InvokeAsync(() => AppendTerminal(e.Data + "\n", "#d4d4d4"));
+        };
+        _terminalProcess.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data != null)
+                Dispatcher.InvokeAsync(() => AppendTerminal(e.Data + "\n", "#f44747"));
+        };
+        _terminalProcess.Exited += (_, _) =>
+            Dispatcher.InvokeAsync(() => AppendTerminal("\n[Process ended. Restart: Ctrl+`]\n", "#6c7086"));
+
+        _terminalProcess.Start();
+        _terminalProcess.BeginOutputReadLine();
+        _terminalProcess.BeginErrorReadLine();
+
+        AppendTerminal("Windows PowerShell — Integrated Terminal\n", "#4ec9b0");
+        AppendTerminal("Dasturlash: python, node, dotnet, git — hammasi ishlaydi\n\n", "#6c7086");
+    }
+
+    private void AppendTerminal(string text, string hexColor)
+    {
+        var color = (Color)ColorConverter.ConvertFromString(hexColor);
+        var run   = new Run(text) { Foreground = new SolidColorBrush(color) };
+        var para  = new Paragraph(run) { Margin = new Thickness(0), LineHeight = 18 };
+        TerminalOutput.Document.Blocks.Add(para);
+        TerminalScroll.ScrollToEnd();
+    }
+
+    // Agent tool results → terminal mirror (run_command, run_powershell, run_python)
+    private static readonly HashSet<string> _terminalTools =
+        ["run_command", "run_powershell", "run_python", "run_node", "run_code"];
+
+    private void MirrorToolToTerminal(string toolName, string argsJson, string result)
+    {
+        if (!_terminalTools.Contains(toolName)) return;
+        if (TerminalPanel.Visibility != Visibility.Visible) return;
+        AppendTerminal($"\n[Agent → {toolName}]\n", "#569cd6");
+        AppendTerminal(result.TrimEnd() + "\n", "#d4d4d4");
+    }
+
+    private void TerminalInput_KeyDown(object sender, KeyEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case Key.Enter:
+            {
+                var cmd = TerminalInput.Text.Trim();
+                TerminalInput.Clear();
+                if (string.IsNullOrEmpty(cmd)) { e.Handled = true; return; }
+                _cmdHistory.Insert(0, cmd);
+                _cmdHistoryIdx = -1;
+                AppendTerminal($"PS > {cmd}\n", "#4ec9b0");
+                if (_terminalProcess == null || _terminalProcess.HasExited) StartTerminal();
+                _terminalProcess!.StandardInput.WriteLine(cmd);
+                e.Handled = true;
+                break;
+            }
+            case Key.Up:
+                if (_cmdHistoryIdx < _cmdHistory.Count - 1)
+                    TerminalInput.Text = _cmdHistory[++_cmdHistoryIdx];
+                TerminalInput.CaretIndex = TerminalInput.Text.Length;
+                e.Handled = true;
+                break;
+            case Key.Down:
+                if (_cmdHistoryIdx > 0)
+                    TerminalInput.Text = _cmdHistory[--_cmdHistoryIdx];
+                else { _cmdHistoryIdx = -1; TerminalInput.Clear(); }
+                TerminalInput.CaretIndex = TerminalInput.Text.Length;
+                e.Handled = true;
+                break;
+        }
+    }
+
+    private void ClearTerminal_Click(object sender, RoutedEventArgs e)
+    {
+        TerminalOutput.Document.Blocks.Clear();
+        _cmdHistoryIdx = -1;
+    }
+
+    private void CloseTerminal_Click(object sender, RoutedEventArgs e)
+    {
+        TerminalPanel.Visibility    = Visibility.Collapsed;
+        TerminalSplitter.Visibility = Visibility.Collapsed;
+        TerminalSplitterRow.Height  = new GridLength(0);
+        TerminalRow.Height          = new GridLength(0);
     }
 
     // Loyihani avtomatik taxlil qilish
     private async void AnalyzeProject_Click(object sender, RoutedEventArgs e)
     {
-        if (string.IsNullOrEmpty(_selectedTreePath) || !Directory.Exists(_selectedTreePath)) return;
+        var dir = _attachedFiles.FirstOrDefault(Directory.Exists);
+        if (string.IsNullOrEmpty(dir)) return;
         ChatInput.Text =
             "Bu loyihani to'liq o'rgan: arxitektura, texnologiyalar, asosiy modullar, " +
             "fayl tuzilishi va kod uslubini tahlil qil. " +
@@ -951,11 +1183,95 @@ public partial class MainWindow : Window
     private void ClearChat_Click(object sender, RoutedEventArgs e) =>
         MessagesPanel.Children.Clear();
 
+    private async void ClearHistory_Click(object sender, RoutedEventArgs e)
+    {
+        if (_hub?.State != Microsoft.AspNetCore.SignalR.Client.HubConnectionState.Connected) return;
+        MessagesPanel.Children.Clear();
+        await _hub.InvokeAsync("ClearHistory", _sessionId);
+        AddMessage(MessageRole.System, "🗑 Suhbat tarixi tozalandi. Xotira (odatlar, faktlar) saqlanib qoldi.");
+    }
+
+    // ═══════════════════════════════════════════
+    // REGISTRATION
+    // ═══════════════════════════════════════════
+
+    private async void Register_Click(object sender, RoutedEventArgs e)
+    {
+        var name    = RegNameInput.Text.Trim();
+        var company = RegCompanyInput.Text.Trim();
+
+        if (string.IsNullOrEmpty(name))
+        {
+            RegStatusText.Text = "Iltimos, ismingizni kiriting.";
+            return;
+        }
+
+        RegSaveBtn.IsEnabled = false;
+        RegStatusText.Text   = "Saqlanmoqda...";
+
+        try
+        {
+            using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+            var payload = System.Text.Json.JsonSerializer.Serialize(new { name, company, language = "uz" });
+            var resp = await http.PostAsync($"{BackendUrl}/api/register",
+                new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json"));
+
+            if (resp.IsSuccessStatusCode)
+            {
+                var json = await resp.Content.ReadAsStringAsync();
+                using var doc = System.Text.Json.JsonDocument.Parse(json);
+                var token = doc.RootElement.GetProperty("token").GetString() ?? Guid.NewGuid().ToString("N");
+
+                var profile = new UserLocalProfile(token, name, company);
+                _userProfileStore.Save(profile);
+                _userToken = token;
+
+                RegisterOverlay.Visibility = Visibility.Collapsed;
+                AddMessage(MessageRole.Assistant,
+                    $"Salom, {name}! Ro'yxatdan o'tdingiz. Men endi sizni har doim taniyman — tarixni tozalasangiz ham.\n" +
+                    "Buyruq bering — o'zim bajaraman. 🚀", _currentModel);
+            }
+            else
+            {
+                RegStatusText.Text = "Backend bilan bog'lanib bo'lmadi. Docker ishlamoqdami?";
+                // Offline fallback — lokal token
+                var token = Guid.NewGuid().ToString("N");
+                _userProfileStore.Save(new UserLocalProfile(token, name, company));
+                _userToken = token;
+                RegisterOverlay.Visibility = Visibility.Collapsed;
+                AddMessage(MessageRole.Assistant, $"Salom, {name}! (Offline rejim)", _currentModel);
+            }
+        }
+        catch
+        {
+            // Backend yo'q bo'lsa ham token yaratib saqlaymiz
+            var token = Guid.NewGuid().ToString("N");
+            _userProfileStore.Save(new UserLocalProfile(token, name, company));
+            _userToken = token;
+            RegisterOverlay.Visibility = Visibility.Collapsed;
+            AddMessage(MessageRole.Assistant, $"Salom, {name}! Lokal profil yaratildi.", _currentModel);
+        }
+        finally
+        {
+            RegSaveBtn.IsEnabled = true;
+            RegStatusText.Text   = "";
+        }
+    }
+
+    private void RegInput_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Return || e.Key == Key.Enter)
+        {
+            Register_Click(sender, e);
+            e.Handled = true;
+        }
+    }
+
     private void AttachFile_Click(object sender, RoutedEventArgs e)
     {
-        var dlg = new Microsoft.Win32.OpenFileDialog { Multiselect = false };
-        if (dlg.ShowDialog() == true)
-            ChatInput.AppendText($"\n[Fayl: {dlg.FileName}]");
+        var dlg = new Microsoft.Win32.OpenFileDialog { Multiselect = true };
+        if (dlg.ShowDialog() != true) return;
+        foreach (var f in dlg.FileNames) AttachFile(f);
     }
 
     private void Voice_Click(object sender, RoutedEventArgs e) =>

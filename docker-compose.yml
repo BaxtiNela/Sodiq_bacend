@@ -18,6 +18,12 @@ services:
               count: 1
               capabilities: [gpu]
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/v1/models', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   # ── WA Backend ──
   wa-backend:
@@ -32,11 +38,14 @@ services:
       - ConnectionStrings__Default=Data Source=/data/assistant.db
       - ASPNETCORE_URLS=http://+:5000
     volumes:
-      - wa_data:/data
+      - D:/WA-Data:/data
     depends_on:
-      - llama-server
+      llama-server:
+        condition: service_healthy
     restart: unless-stopped
-
-volumes:
-  wa_data:
-    name: wa-assistant-data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

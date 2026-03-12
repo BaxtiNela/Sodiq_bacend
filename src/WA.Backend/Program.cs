@@ -38,12 +38,16 @@ using (var scope = app.Services.CreateScope())
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     db.Database.EnsureCreated();
 
-    // Default owner profile
-    if (!db.OwnerProfiles.Any())
+    // Schema migration: yangi ustunlar qo'shish (agar mavjud bo'lmasa)
+    try { db.Database.ExecuteSqlRaw("ALTER TABLE OwnerProfiles ADD COLUMN UserToken TEXT NOT NULL DEFAULT ''"); } catch { }
+    try { db.Database.ExecuteSqlRaw("ALTER TABLE OwnerProfiles ADD COLUMN Company TEXT NOT NULL DEFAULT ''"); } catch { }
+
+    // Mavjud profillarga token berish (eski ma'lumotlar uchun)
+    foreach (var p in db.OwnerProfiles.Where(x => x.UserToken == "").ToList())
     {
-        db.OwnerProfiles.Add(new OwnerProfile());
-        db.SaveChanges();
+        p.UserToken = Guid.NewGuid().ToString("N");
     }
+    db.SaveChanges();
 }
 
 app.UseCors();
@@ -100,14 +104,38 @@ app.MapDelete("/api/memory/{id:int}", async (int id, MemoryBackendService mem) =
     return Results.Ok();
 });
 
-// Ega profili
+// Ro'yxatdan o'tish — token yaratish
+app.MapPost("/api/register", async (RegisterUserRequest req, AppDbContext db) =>
+{
+    var token = Guid.NewGuid().ToString("N");
+    var profile = new OwnerProfile
+    {
+        UserToken = token,
+        Name      = req.Name ?? "Foydalanuvchi",
+        Company   = req.Company ?? string.Empty,
+        Language  = req.Language ?? "uz"
+    };
+    db.OwnerProfiles.Add(profile);
+    await db.SaveChangesAsync();
+    return Results.Ok(new { token, profile.Name, profile.Company });
+});
+
+// Token orqali profil olish
+app.MapGet("/api/profile/{token}", async (string token, AppDbContext db) =>
+{
+    var profile = await db.OwnerProfiles.FirstOrDefaultAsync(p => p.UserToken == token);
+    return profile is null ? Results.NotFound() : Results.Ok(profile);
+});
+
+// Ega profili (birinchi profil — eski compat)
 app.MapGet("/api/profile", async (AppDbContext db) =>
     Results.Ok(await db.OwnerProfiles.FirstOrDefaultAsync()));
 
-app.MapPut("/api/profile", async (ProfileUpdateRequest req, AppDbContext db) =>
+app.MapPut("/api/profile/{token}", async (string token, ProfileUpdateRequest req, AppDbContext db) =>
 {
-    var profile = await db.OwnerProfiles.FirstOrDefaultAsync()
-        ?? new OwnerProfile();
+    var profile = await db.OwnerProfiles.FirstOrDefaultAsync(p => p.UserToken == token)
+        ?? await db.OwnerProfiles.FirstOrDefaultAsync()
+        ?? new OwnerProfile { UserToken = token };
 
     if (req.Name != null) profile.Name = req.Name;
     if (req.Language != null) profile.Language = req.Language;
@@ -116,6 +144,20 @@ app.MapPut("/api/profile", async (ProfileUpdateRequest req, AppDbContext db) =>
     if (req.Notes != null) profile.Notes = req.Notes;
     profile.LastSeen = DateTime.UtcNow;
 
+    if (profile.Id == 0) db.OwnerProfiles.Add(profile);
+    await db.SaveChangesAsync();
+    return Results.Ok(profile);
+});
+
+app.MapPut("/api/profile", async (ProfileUpdateRequest req, AppDbContext db) =>
+{
+    var profile = await db.OwnerProfiles.FirstOrDefaultAsync() ?? new OwnerProfile();
+    if (req.Name != null) profile.Name = req.Name;
+    if (req.Language != null) profile.Language = req.Language;
+    if (req.Timezone != null) profile.Timezone = req.Timezone;
+    if (req.WorkingHours != null) profile.WorkingHours = req.WorkingHours;
+    if (req.Notes != null) profile.Notes = req.Notes;
+    profile.LastSeen = DateTime.UtcNow;
     if (profile.Id == 0) db.OwnerProfiles.Add(profile);
     await db.SaveChangesAsync();
     return Results.Ok(profile);

@@ -22,15 +22,17 @@ public class AssistantHub(
     private const int MaxRounds = 15;
 
     // Kutilayotgan tool result'lar: connectionId -> (callId -> TaskCompletionSource)
-    private static readonly Dictionary<string, Dictionary<string, TaskCompletionSource<string>>>
-        _pendingTools = [];
+    // ConcurrentDictionary — thread-safe, bir vaqtda bir nechta connection uchun xavfsiz
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<
+        string, System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource<string>>>
+        _pendingTools = new();
 
     // ═══════════════════════════════════════════════════════════════
     // CLIENT → SERVER
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>Yangi xabar yuborish</summary>
-    public async Task SendMessage(string sessionId, string userMessage, string? model = null)
+    public async Task SendMessage(string sessionId, string userMessage, string? model = null, string? userToken = null)
     {
         var connId = Context.ConnectionId;
         logger.LogInformation("[{Conn}] SendMessage: session={Session}", connId, sessionId);
@@ -46,15 +48,20 @@ public class AssistantHub(
 
             await Clients.Caller.SendAsync("StatusUpdate", "Kontekst yuklanmoqda...");
 
-            // Kontekst qurish
-            var contextBlock = await ctxBuilder.BuildAsync(userMessage, sessionId);
+            // Kontekst qurish (token orqali foydalanuvchi profili yuklanadi)
+            var contextBlock = await ctxBuilder.BuildAsync(userMessage, sessionId, userToken);
             var systemMsg = ollama.BuildSystemMessage(contextBlock);
 
             // Barcha xabarlarni yig'ish (session tarixi)
+            // tool xabarlarini o'tkazib yuboramiz — ularda tool_call_id kerak, eski DB da yo'q
+            // Har bir xabarni 1500 belgiga cheklaymiz — token limitini oshirmaslik uchun
             var history = conv.Messages
                 .OrderBy(m => m.CreatedAt)
-                .TakeLast(30)
-                .Select(m => new OllamaMessage(m.Role, m.Content))
+                .Where(m => (m.Role == "user" || m.Role == "assistant")
+                            && !string.IsNullOrEmpty(m.Content))
+                .TakeLast(12)
+                .Select(m => new OllamaMessage(m.Role,
+                    m.Content.Length > 1500 ? m.Content[..1500] + "…" : m.Content))
                 .ToList();
 
             // System message boshida bo'lsin
@@ -96,12 +103,9 @@ public class AssistantHub(
 
                     // WPF ga tool bajarish so'rovi
                     var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-                    lock (_pendingTools)
-                    {
-                        if (!_pendingTools.ContainsKey(connId))
-                            _pendingTools[connId] = [];
-                        _pendingTools[connId][callId] = tcs;
-                    }
+                    var connPending = _pendingTools.GetOrAdd(connId,
+                        _ => new System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource<string>>());
+                    connPending[callId] = tcs;
 
                     await Clients.Caller.SendAsync("ToolCallRequest", callId, tc.Name, tc.ArgsJson);
 
@@ -111,8 +115,8 @@ public class AssistantHub(
 
                     var toolResult = await tcs.Task;
 
-                    lock (_pendingTools)
-                        _pendingTools[connId].Remove(callId);
+                    if (_pendingTools.TryGetValue(connId, out var cp))
+                        cp.TryRemove(callId, out _);
 
                     logger.LogInformation("[{Conn}] Tool {Name} result: {Result}",
                         connId, tc.Name, toolResult[..Math.Min(100, toolResult.Length)]);
@@ -123,7 +127,7 @@ public class AssistantHub(
                         Role = "tool",
                         Content = toolResult,
                         ToolName = tc.Name,
-                        ToolCallId = callId
+                        ToolCallId = tc.Id
                     });
                     await db.SaveChangesAsync();
 
@@ -146,8 +150,11 @@ public class AssistantHub(
 
             await Clients.Caller.SendAsync("FinalResponse", finalResponse, sessionId);
 
-            // Background: o'rganish
-            _ = Task.Run(() => learner.ExtractAndSaveAsync(userMessage, finalResponse));
+            // Background: o'rganish + eski xabarlarni tozalash (faqat so'nggi 6 ta saqlanadi)
+            _ = Task.Run(async () => {
+                await learner.ExtractAndSaveAsync(userMessage, finalResponse);
+                await learner.PruneOldMessagesAsync(conv.Id);
+            });
         }
         catch (Exception ex)
         {
@@ -156,17 +163,27 @@ public class AssistantHub(
         }
     }
 
+    /// <summary>Session tarixini tozalash — xotira saqlanadi, faqat xabarlar o'chiriladi</summary>
+    public async Task ClearHistory(string sessionId)
+    {
+        var conv = await db.Conversations
+            .Include(c => c.Messages)
+            .FirstOrDefaultAsync(c => c.SessionId == sessionId);
+        if (conv == null) return;
+        db.Messages.RemoveRange(conv.Messages);
+        await db.SaveChangesAsync();
+        logger.LogInformation("ClearHistory: session={Session}", sessionId);
+        await Clients.Caller.SendAsync("HistoryCleared", sessionId);
+    }
+
     /// <summary>WPF tool natijasini qaytaradi</summary>
     public Task SendToolResult(string sessionId, string callId, string toolName, string result)
     {
         var connId = Context.ConnectionId;
-        lock (_pendingTools)
+        if (_pendingTools.TryGetValue(connId, out var pending) &&
+            pending.TryGetValue(callId, out var tcs))
         {
-            if (_pendingTools.TryGetValue(connId, out var pending) &&
-                pending.TryGetValue(callId, out var tcs))
-            {
-                tcs.TrySetResult(result);
-            }
+            tcs.TrySetResult(result);
         }
         return Task.CompletedTask;
     }
@@ -200,8 +217,9 @@ public class AssistantHub(
 
     public override Task OnDisconnectedAsync(Exception? exception)
     {
-        lock (_pendingTools)
-            _pendingTools.Remove(Context.ConnectionId);
+        if (_pendingTools.TryRemove(Context.ConnectionId, out var pending))
+            foreach (var tcs in pending.Values)
+                tcs.TrySetResult("[disconnected]");
         return base.OnDisconnectedAsync(exception);
     }
 
@@ -238,43 +256,101 @@ public class AssistantHub(
     /// <summary>WPF ToolExecutor bilan mos keluvchi tool ta'riflari</summary>
     private static List<ToolDefinition> GetAllTools() =>
     [
-        Tool("run_command", "Windows CMD buyrug'ini bajarish",
-            Props(P("command", "CMD buyrug'i"), P("working_dir", "Ishchi papka (ixtiyoriy)")),
+        // ── Tizim buyruqlari ──
+        Tool("run_command", "Windows CMD buyrug'ini bajarish va natijani olish",
+            Props(P("command", "CMD buyrug'i")),
             ["command"]),
 
         Tool("run_powershell", "PowerShell skriptini bajarish",
             Props(P("script", "PowerShell kodi")),
             ["script"]),
 
+        // ── Fayl operatsiyalari ──
         Tool("read_file", "Fayl mazmunini o'qish",
             Props(P("path", "Fayl yo'li")),
             ["path"]),
 
-        Tool("write_file", "Faylga yozish",
+        Tool("write_file", "Faylga yozish yoki yangi fayl yaratish",
             Props(P("path", "Fayl yo'li"), P("content", "Yoziladigan mazmun")),
             ["path", "content"]),
 
         Tool("list_directory", "Papka tarkibini ko'rish",
-            Props(P("path", "Papka yo'li")),
+            Props(P("path", "Papka yo'li (bo'sh = home)")),
             ["path"]),
 
-        Tool("search_files", "Fayllarda qidirish",
-            Props(P("pattern", "Qidiruv namunasi"), P("directory", "Qidiruv papkasi")),
-            ["pattern"]),
+        Tool("search_files", "Fayllarda qidirish (*.py, *.txt kabi)",
+            Props(P("pattern", "Pattern (masalan: *.py)"), P("directory", "Qidiruv papkasi")),
+            ["pattern", "directory"]),
 
-        Tool("get_system_info", "Tizim ma'lumotlarini olish",
-            Props(P("type", "Tur: cpu|memory|disk|os|all")),
+        Tool("delete_file", "Faylni o'chirish",
+            Props(P("path", "O'chiriladigan fayl yo'li")),
+            ["path"]),
+
+        Tool("rename_file", "Faylni qayta nomlash yoki ko'chirish",
+            Props(P("old_path", "Eski yo'l"), P("new_path", "Yangi yo'l")),
+            ["old_path", "new_path"]),
+
+        // ── Tizim ma'lumotlari ──
+        Tool("get_system_info", "CPU, RAM, disk, OS ma'lumotlari",
+            Props(P("type", "all|cpu|memory|disk|os")),
             ["type"]),
 
-        Tool("open_app", "Dastur ochish",
-            Props(P("name", "Dastur nomi yoki yo'li")),
+        Tool("get_time", "Hozirgi vaqt, sana va timezone",
+            Props(P("format", "short|full|iso (ixtiyoriy)")),
+            []),
+
+        Tool("get_env", "Environment o'zgaruvchisini o'qish",
+            Props(P("name", "O'zgaruvchi nomi (PATH, TEMP, USERNAME, ...)")),
             ["name"]),
 
-        Tool("save_memory", "Xotiraga saqlash",
-            Props(P("key", "Kalit"), P("value", "Qiymat"), P("category", "Tur: fact|habit|preference")),
+        // ── Desktop boshqaruv ──
+        Tool("open_app", "Dastur ochish",
+            Props(P("name", "Dastur nomi (chrome, notepad, code, ...)")),
+            ["name"]),
+
+        Tool("take_screenshot", "Ekran rasmini olish va saqlash",
+            Props(P("filename", "Fayl nomi ixtiyoriy (.png)")),
+            []),
+
+        Tool("get_clipboard", "Clipboard (bufer) mazmunini o'qish",
+            Props(P("dummy", "ixtiyoriy")),
+            []),
+
+        Tool("set_clipboard", "Clipboardga matn yozish",
+            Props(P("text", "Clipboardga yoziladigan matn")),
+            ["text"]),
+
+        Tool("list_windows", "Hozir ochiq oynalar ro'yxati",
+            Props(P("dummy", "ixtiyoriy")),
+            []),
+
+        Tool("focus_window", "Oynani oldinga chiqarish",
+            Props(P("title", "Oyna sarlavhasidan qism (Notepad, Chrome)")),
+            ["title"]),
+
+        Tool("close_window", "Oynani yopish",
+            Props(P("title", "Oyna sarlavhasidan qism")),
+            ["title"]),
+
+        Tool("set_volume", "Ovoz balandligini o'rnatish (0-100)",
+            Props(P("level", "0-100 son")),
+            ["level"]),
+
+        // ── Internet ──
+        Tool("web_search", "DuckDuckGo orqali internetdan qidirish. Sarlavha + URL + snippet qaytaradi",
+            Props(P("query", "Qidiruv so'zi"), P("num_results", "Natijalar soni (default 5)")),
+            ["query"]),
+
+        Tool("read_url", "URL veb-sahifasini o'qib mazmunini chiqarish",
+            Props(P("url", "To'liq URL (https://...)"), P("max_chars", "Max belgilar (default 5000)")),
+            ["url"]),
+
+        // ── Xotira ──
+        Tool("save_memory", "Muhim ma'lumotni doimiy xotiraga saqlash",
+            Props(P("key", "Kalit"), P("value", "Qiymat"), P("category", "fact|project|instruction|habit|preference")),
             ["key", "value"]),
 
-        Tool("recall_memory", "Xotiradan eslab olish",
+        Tool("recall_memory", "Xotiradan ma'lumot qidirish",
             Props(P("query", "Qidiruv so'zi")),
             ["query"]),
     ];
