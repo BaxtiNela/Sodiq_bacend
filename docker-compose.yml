@@ -1,23 +1,22 @@
 services:
 
-  # ── llama.cpp server (Ollama o'rniga, 20-40% tezroq) ──
-  # Model: models/ papkasiga setup_model.sh orqali yuklang
+  # ── llama-cpp-python server — RTX 2060 GPU accelerated ──
   llama-server:
-    image: ghcr.io/ggerganov/llama.cpp:server
+    build:
+      context: .
+      dockerfile: Dockerfile.llm
     container_name: wa-llm
     ports:
       - "8080:8080"
     volumes:
       - ./models:/models
-    command: >
-      --model /models/qwen2.5-7b-q4_k_m.gguf
-      --host 0.0.0.0
-      --port 8080
-      --ctx-size 4096
-      --threads 8
-      --parallel 2
-      --cont-batching
-      --flash-attn
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     restart: unless-stopped
 
   # ── WA Backend ──
