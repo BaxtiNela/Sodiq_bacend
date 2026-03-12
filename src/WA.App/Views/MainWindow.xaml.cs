@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
@@ -422,31 +423,12 @@ public partial class MainWindow : Window
             return;
         }
 
-        // Sessiya tarixini yuklash
-        var history = new List<(string Role, string Content)>();
-        foreach (var child in MessagesPanel.Children.OfType<ChatBubble>())
-        {
-            if (child.CachedRole is MessageRole.User or MessageRole.Assistant)
-                history.Add((
-                    child.CachedRole == MessageRole.User ? "user" : "assistant",
-                    child.CachedText ?? ""));
-        }
-
         _extApiCts = new CancellationTokenSource();
-        SetStatus($"{ExternalApiClient.ProviderLabel(_currentModel)} ishlayapti...");
+        SetStatus($"{ExternalApiClient.ProviderLabel(_currentModel)} agent ishlayapti...");
 
         try
         {
-            await _extClient.StreamAsync(
-                _currentModel, apiKey, history,
-                token => Dispatcher.InvokeAsync(() => AppendStreamToken(token)),
-                _extApiCts.Token);
-
-            var fullText = _streamBuffer.ToString();
-            _chatStore.SaveMessage(_sessionId, "assistant", fullText, _currentModel);
-
-            // Bilimlarni backendga o'tkazish (pulli AI → local model uchun xotira)
-            _ = Task.Run(() => SaveExternalLearningToBackendAsync(userText, fullText));
+            await RunExternalAgentLoopAsync(_currentModel, apiKey, userText, _extApiCts.Token);
         }
         catch (OperationCanceledException)
         {
@@ -454,7 +436,8 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            AddMessage(MessageRole.System, $"❌ {ExternalApiClient.ProviderLabel(_currentModel)} xato: {ex.Message}");
+            AddMessage(MessageRole.System,
+                $"❌ {ExternalApiClient.ProviderLabel(_currentModel)} xato: {ex.Message}");
         }
         finally
         {
@@ -465,6 +448,160 @@ public partial class MainWindow : Window
             SetStatus("Tayyor");
             AiPanelStatus.Text = "AI Agent";
         }
+    }
+
+    /// <summary>
+    /// DeepSeek/OpenAI agent loop — toollar bilan.
+    /// Tool call → WPF ToolExecutor → natija → LLM → ... → final javob.
+    /// </summary>
+    private async Task RunExternalAgentLoopAsync(
+        string model, string apiKey, string userText, CancellationToken ct)
+    {
+        const int MaxRounds = 15;
+        const string SystemPrompt =
+            "Sen Windows kompyuterni MUSTAQIL boshqaruvchi AI agentsan.\n" +
+            "FIKRLASH TARTIBI (ReAct):\n" +
+            "1. TAHLIL — Vazifani tushun, kerakli toolni tanla\n" +
+            "2. HARAKAT — Tool ishlatib vazifani boshlash\n" +
+            "3. KUZAT — Natijani ko'r, xato bo'lsa tuzat\n" +
+            "4. YAKUN — Foydalanuvchiga faqat foydali natijani qisqa yoz\n\n" +
+            "QATTIQ QOIDALAR:\n" +
+            "- HECH QACHON 'siz qiling', 'bosing' dema — O'ZING qil\n" +
+            "- Xato bo'lsa muqobil yo'l bil, baribir natija chiqar\n" +
+            "- Internet kerakmi → web_search → read_url ketma-ket ishlat";
+
+        // Sessiya tarixini yuklash
+        var messages = new List<JsonObject>();
+        messages.Add(new JsonObject { ["role"] = "system", ["content"] = SystemPrompt });
+
+        foreach (var child in MessagesPanel.Children.OfType<ChatBubble>())
+        {
+            if (child.CachedRole is MessageRole.User or MessageRole.Assistant &&
+                !string.IsNullOrEmpty(child.CachedText))
+            {
+                var role = child.CachedRole == MessageRole.User ? "user" : "assistant";
+                messages.Add(new JsonObject { ["role"] = role, ["content"] = child.CachedText });
+            }
+        }
+
+        string finalResponse = string.Empty;
+
+        for (int round = 0; round < MaxRounds; round++)
+        {
+            ct.ThrowIfCancellationRequested();
+            await Dispatcher.InvokeAsync(() =>
+            {
+                SetStatus(round == 0
+                    ? $"{ExternalApiClient.ProviderLabel(model)} o'ylayapti..."
+                    : $"{ExternalApiClient.ProviderLabel(model)} davom etmoqda... ({round})");
+            });
+
+            var turn = await _extClient.ChatWithToolsAsync(model, apiKey, messages, ct);
+
+            if (!turn.HasToolCalls)
+            {
+                // Yakuniy javob — token-by-token ko'rsatish
+                finalResponse = turn.Content ?? string.Empty;
+                foreach (var chunk in ChunkString(finalResponse, 15))
+                {
+                    ct.ThrowIfCancellationRequested();
+                    await Dispatcher.InvokeAsync(() => AppendStreamToken(chunk));
+                    await Task.Delay(10, ct);
+                }
+                break;
+            }
+
+            // Tool call'lar — assistant xabarini qo'shish
+            if (turn.AssistantMessageNode != null)
+                messages.Add(turn.AssistantMessageNode);
+
+            // Har bir tool ni bajarish
+            foreach (var tc in turn.ToolCalls!)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                Dictionary<string, object?> args;
+                try { args = JsonSerializer.Deserialize<Dictionary<string, object?>>(tc.ArgsJson) ?? []; }
+                catch { args = []; }
+
+                // UI: tool activity bubble
+                ToolActivityBubble? actBubble = null;
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    var preview = ToolActivityBubble.FormatArgsPreview(tc.Name, args);
+                    actBubble   = new ToolActivityBubble(tc.Name, preview);
+                    MessagesPanel.Children.Add(actBubble);
+                    ChatScroll.ScrollToEnd();
+                    SetStatus($"Tool: {tc.Name}...");
+                });
+
+                // write_file uchun ruxsat (Ask rejimida)
+                if (tc.Name == "write_file" && !_isAutoMode)
+                {
+                    string GetArg(string k) => args.TryGetValue(k, out var v) ? v?.ToString() ?? "" : "";
+                    EditPermissionBubble? permBubble = null;
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        permBubble = new EditPermissionBubble(GetArg("path"), GetArg("content"));
+                        MessagesPanel.Children.Add(permBubble);
+                        ChatScroll.ScrollToEnd();
+                    });
+                    var allowed = await permBubble!.Decision;
+                    if (!allowed)
+                    {
+                        actBubble?.SetDone("Foydalanuvchi rad etdi", success: false);
+                        messages.Add(new JsonObject
+                        {
+                            ["role"]         = "tool",
+                            ["tool_call_id"] = tc.Id,
+                            ["content"]      = "Foydalanuvchi fayl tahrirlashni rad etdi"
+                        });
+                        continue;
+                    }
+                }
+
+                var call   = new WA.Agent.Models.ToolCall(tc.Id, tc.Name, args);
+                var result = await _executor.ExecuteAsync(call);
+                var ok     = !result.StartsWith("Xato") && !result.StartsWith("[Xato]");
+
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    actBubble?.SetDone(result, ok);
+                    MirrorToolToTerminal(tc.Name, tc.ArgsJson, result);
+
+                    // write_file → editor yangilash
+                    if (tc.Name == "write_file" && ok)
+                    {
+                        string GetArg(string k) => args.TryGetValue(k, out var v) ? v?.ToString() ?? "" : "";
+                        _ = RefreshEditorAfterWrite(GetArg("path"), GetArg("content"));
+                    }
+                });
+
+                // Tool natijasini messages ga qo'shish
+                messages.Add(new JsonObject
+                {
+                    ["role"]         = "tool",
+                    ["tool_call_id"] = tc.Id,
+                    ["content"]      = result
+                });
+            }
+        }
+
+        if (string.IsNullOrEmpty(finalResponse))
+        {
+            finalResponse = "Maksimal qadam soniga yetildi.";
+            await Dispatcher.InvokeAsync(() => AppendStreamToken(finalResponse));
+        }
+
+        // Saqlash + learning
+        _chatStore.SaveMessage(_sessionId, "assistant", finalResponse, model);
+        _ = Task.Run(() => SaveExternalLearningToBackendAsync(userText, finalResponse));
+    }
+
+    private static IEnumerable<string> ChunkString(string text, int size)
+    {
+        for (int i = 0; i < text.Length; i += size)
+            yield return text[i..Math.Min(i + size, text.Length)];
     }
 
     // Pulli AI javobini backendga o'tkazish (local modellar foydalanishi uchun)
