@@ -80,8 +80,14 @@ public class AssistantHub(
                     break;
                 }
 
-                // Tool call'larni bajarish
-                messages.Add(new OllamaMessage("assistant", resp.Content));
+                // Tool call'larni bajarish — assistant xabari tool_calls bilan
+                var tcJson = System.Text.Json.JsonSerializer.Serialize(
+                    resp.ToolCalls.Select(t => new {
+                        id = t.Id, type = "function",
+                        function = new { name = t.Name, arguments = t.ArgsJson }
+                    }));
+                messages.Add(new OllamaMessage("assistant", resp.Content ?? string.Empty,
+                    ToolCallsJson: tcJson));
 
                 foreach (var tc in resp.ToolCalls)
                 {
@@ -121,8 +127,8 @@ public class AssistantHub(
                     });
                     await db.SaveChangesAsync();
 
-                    // Tool natijasini xabarlarga qo'shish
-                    messages.Add(new OllamaMessage("tool", $"[{tc.Name}]: {toolResult}"));
+                    // Tool natijasini xabarlarga qo'shish (tool_call_id majburiy)
+                    messages.Add(new OllamaMessage("tool", toolResult, ToolCallId: tc.Id));
 
                     await Clients.Caller.SendAsync("ToolResult", tc.Name, toolResult[..Math.Min(500, toolResult.Length)]);
                 }

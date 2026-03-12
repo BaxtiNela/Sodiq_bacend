@@ -52,7 +52,7 @@ public class OllamaBackendClient
         var body = new
         {
             model    = model ?? DefaultModel,
-            messages = messages.Select(m => new { role = m.Role, content = m.Content }),
+            messages = messages.Select(SerializeMessage),
             tools    = tools != null && tools.Count > 0 ? (object)tools : null,
             stream   = false,
             max_tokens = 2048
@@ -74,7 +74,7 @@ public class OllamaBackendClient
         var body = JsonSerializer.Serialize(new
         {
             model    = model ?? DefaultModel,
-            messages = messages.Select(m => new { role = m.Role, content = m.Content }),
+            messages = messages.Select(SerializeMessage),
             stream   = true,
             max_tokens = 2048
         });
@@ -134,6 +134,19 @@ public class OllamaBackendClient
     public OllamaMessage BuildSystemMessage(string contextBlock) =>
         new("system", $"{SystemPrompt}\n\n{contextBlock}");
 
+    // ── Serialize message to OpenAI format (handles tool + assistant-with-tool_calls) ──
+    private static object SerializeMessage(OllamaMessage m)
+    {
+        if (m.Role == "tool")
+            return new { role = m.Role, content = m.Content, tool_call_id = m.ToolCallId ?? string.Empty };
+
+        if (m.ToolCallsJson != null)
+            return new { role = m.Role, content = (string?)null,
+                tool_calls = JsonNode.Parse(m.ToolCallsJson) };
+
+        return new { role = m.Role, content = m.Content };
+    }
+
     // ── Parse OpenAI-compatible response ──
     private static OllamaResponse ParseResponse(JsonNode json)
     {
@@ -153,7 +166,8 @@ public class OllamaBackendClient
                     fn["name"]?.GetValue<string>() ?? string.Empty,
                     fn["arguments"]?.GetValue<string>()
                         ?? fn["arguments"]?.ToJsonString()
-                        ?? "{}"));
+                        ?? "{}",
+                    tc?["id"]?.GetValue<string>() ?? Guid.NewGuid().ToString("N")[..8]));
             }
         }
 
@@ -179,14 +193,15 @@ public class OllamaBackendClient
 
 // ---- Value types ----
 
-public record OllamaMessage(string Role, string Content);
+public record OllamaMessage(string Role, string Content,
+    string? ToolCallId = null, string? ToolCallsJson = null);
 
 public record OllamaResponse(string Content, List<OllamaToolCall> ToolCalls)
 {
     public bool HasToolCalls => ToolCalls.Count > 0;
 }
 
-public record OllamaToolCall(string Name, string ArgsJson);
+public record OllamaToolCall(string Name, string ArgsJson, string Id = "");
 
 public record ToolDefinition(string Type, ToolFunction Function);
 
