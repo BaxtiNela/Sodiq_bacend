@@ -6,7 +6,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
 
-    <AssemblyName>WindowsAssistantNext</AssemblyName>
+    <AssemblyName>Sodiq</AssemblyName>
+    <Product>Sodiq</Product>
+    <ApplicationIcon>sodiq.ico</ApplicationIcon>
     <RootNamespace>WA.App</RootNamespace>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Platforms>x64</Platforms>
@@ -27,6 +29,9 @@
 
   <ItemGroup>
     <Content Include="Resources\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="sodiq.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
