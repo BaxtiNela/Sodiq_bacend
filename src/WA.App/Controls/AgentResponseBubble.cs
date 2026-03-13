@@ -282,11 +282,12 @@ public class AgentResponseBubble : Border
             {
                 IsReadOnly  = true,
                 TextWrapping = TextWrapping.Wrap,
-                Background   = Brushes.Transparent,
+                Background   = new SolidColorBrush(Color.FromRgb(13, 17, 23)),   // #0d1117 explicit dark
                 BorderThickness = new Thickness(0),
                 FontFamily   = new FontFamily("Cascadia Code, Consolas"),
                 FontSize     = 11,
-                Foreground   = app?.FindResource("Brush.Text.Secondary") as Brush ?? Brushes.LightGray,
+                Foreground   = new SolidColorBrush(Color.FromRgb(212, 212, 212)), // #d4d4d4
+                CaretBrush   = new SolidColorBrush(Color.FromRgb(212, 212, 212)),
                 MaxHeight    = 200,
                 VerticalScrollBarVisibility   = ScrollBarVisibility.Auto,
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,

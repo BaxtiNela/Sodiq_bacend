@@ -434,6 +434,21 @@ public class AssistantHub(
         Tool("recall_memory", "Xotiradan ma'lumot qidirish",
             Props(P("query", "Qidiruv so'zi")),
             ["query"]),
+
+        // ── Dev tools ──
+        Tool("git_command", "Git buyrug'ini bajarish (status, add, commit, log, diff, push, pull...)",
+            Props(P("command", "git subcommand, masalan: status  yoki  add -A  yoki  commit -m 'msg'"),
+                  P("directory", "Loyiha papkasi yo'li (ixtiyoriy)")),
+            ["command"]),
+
+        Tool("install_package", "Paket o'rnatish: pip, npm, yarn, dotnet, go, cargo, flutter",
+            Props(P("manager", "pip|npm|yarn|dotnet|go|cargo|flutter|dart"),
+                  P("package", "Paket nomi, masalan: requests  yoki  express")),
+            ["manager", "package"]),
+
+        Tool("run_script", "Mavjud skript faylini ishga tushirish (.py, .js, .ts, .ps1, .bat, .sh, .dart, .go)",
+            Props(P("path", "Skript faylining to'liq yo'li")),
+            ["path"]),
     ];
 
     private static ToolDefinition Tool(string name, string desc,

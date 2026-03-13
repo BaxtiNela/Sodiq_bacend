@@ -35,6 +35,7 @@ public partial class MainWindow : Window
     // System tray + mini widget
     private H.NotifyIcon.TaskbarIcon? _notifyIcon;
     private MiniWidget? _miniWidget;
+    private bool _reallyClosing;
 
     // Voice recording (Groq Whisper)
     private WaveInEvent?   _waveIn;
@@ -2030,11 +2031,7 @@ public partial class MainWindow : Window
     private void Minimize_Click(object sender, RoutedEventArgs e) =>
         WindowState = WindowState.Minimized;
 
-    private void OnStateChanged(object? sender, EventArgs e)
-    {
-        if (WindowState == WindowState.Minimized)
-            MinimizeToTray();
-    }
+    private void OnStateChanged(object? sender, EventArgs e) { }  // minimize = taskbar, not tray
 
     private void InitTrayIcon()
     {
@@ -2055,8 +2052,9 @@ public partial class MainWindow : Window
         var miExit  = new MenuItem { Header = "Chiqish" };
         miExit.Click += (s, e) =>
         {
-            _notifyIcon.Visibility = Visibility.Collapsed;
-            Application.Current.Shutdown();
+            _reallyClosing = true;
+            if (_notifyIcon != null) _notifyIcon.Visibility = Visibility.Collapsed;
+            Close();
         };
         ctxMenu.Items.Add(miOpen);
         ctxMenu.Items.Add(miExit);
@@ -2085,7 +2083,14 @@ public partial class MainWindow : Window
         WindowState = WindowState == WindowState.Maximized
             ? WindowState.Normal : WindowState.Maximized;
 
-    private void Close_Click(object sender, RoutedEventArgs e) => Close();
+    private void Close_Click(object sender, RoutedEventArgs e) => MinimizeToTray();
+
+    protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+    {
+        if (_reallyClosing) { base.OnClosing(e); return; }
+        e.Cancel = true;
+        MinimizeToTray();
+    }
 
     // ═══════════════════════════════════════════
     // HELPERS

@@ -63,6 +63,9 @@ public class LocalLlmClient
         - Run Java code → run_java(code)
         - Run Dart/Flutter → run_dart(code)
         - Run C# script → run_csharp(code)
+        - Git operations → git_command(command, directory)  e.g. "status", "add -A", "commit -m 'msg'"
+        - Install package → install_package(manager, package)  [pip, npm, yarn, dotnet, go, flutter]
+        - Run script file → run_script(path)  [.py, .js, .ps1, .bat, .dart, .go]
         - System info → get_system_info(type)
         - Screenshot → take_screenshot()
         - Clipboard → get_clipboard() / set_clipboard(text)

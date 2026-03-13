@@ -36,11 +36,11 @@ public class ToolExecutor
                 "run_powershell" => await RunPowershell(Get("script") is { Length: > 0 } s ? s : Get("command")),
 
                 // ── Dasturlash tillari ──
-                "run_python"  => await RunCmd($"python -c \"{EscapeForCmd(Get("code"))}\""),
-                "run_node"    => await RunCmd($"node -e \"{EscapeForCmd(Get("code"))}\""),
+                "run_python"  => await RunPythonCode(Get("code")),
+                "run_node"    => await RunNodeCode(Get("code")),
                 "run_go"      => await RunGoCode(Get("code")),
                 "run_java"    => await RunJavaCode(Get("code")),
-                "run_dart"    => await RunCmd($"dart run --stdin \"{EscapeForCmd(Get("code"))}\""),
+                "run_dart"    => await RunDartCode(Get("code")),
                 "run_csharp"  => await RunCSharpCode(Get("code")),
 
                 // ── Fayl ──
@@ -73,6 +73,11 @@ public class ToolExecutor
                 // ── Xotira ──
                 "save_memory"   => _memory.Save(Get("key"), Get("value"), Get("category")),
                 "recall_memory" => _memory.Recall(Get("query")),
+
+                // ── Dev tools ──
+                "git_command"     => await RunGitCommand(Get("command"), Get("directory")),
+                "install_package" => await RunInstallPackage(Get("manager"), Get("package")),
+                "run_script"      => await RunScript(Get("path")),
 
                 _ => $"Noma'lum tool: {call.Name}"
             };
@@ -618,6 +623,101 @@ Write-Output ""Ovoz: $volume%""
 
     private static string EscapeForCmd(string code)
         => code.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "\\n");
+
+    private static async Task<string> RunPythonCode(string code)
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), $"wa_{Guid.NewGuid():N}.py");
+        await File.WriteAllTextAsync(tmp, code);
+        // Windows: "py" launcher, then python3, then python
+        foreach (var exe in new[] { "py", "python3", "python" })
+        {
+            var r = await RunProcessAsync(exe, $"\"{tmp}\"");
+            if (!r.Contains("topilmadi yoki xato")) { try { File.Delete(tmp); } catch { } return r; }
+        }
+        try { File.Delete(tmp); } catch { }
+        return Err("Python topilmadi. https://python.org dan o'rnating yoki MS Store aliasini o'chiring.");
+    }
+
+    private static async Task<string> RunNodeCode(string code)
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), $"wa_{Guid.NewGuid():N}.js");
+        await File.WriteAllTextAsync(tmp, code);
+        var r = await RunProcessAsync("node", $"\"{tmp}\"");
+        try { File.Delete(tmp); } catch { }
+        return r;
+    }
+
+    private static async Task<string> RunDartCode(string code)
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), $"wa_{Guid.NewGuid():N}.dart");
+        await File.WriteAllTextAsync(tmp, code);
+        var r = await RunProcessAsync("dart", $"run \"{tmp}\"");
+        try { File.Delete(tmp); } catch { }
+        return r;
+    }
+
+    private static async Task<string> RunGitCommand(string command, string directory)
+    {
+        var dir = string.IsNullOrWhiteSpace(directory) ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) : directory;
+        var psi = new ProcessStartInfo("git", command)
+        {
+            WorkingDirectory       = Directory.Exists(dir) ? dir : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            RedirectStandardOutput = true,
+            RedirectStandardError  = true,
+            UseShellExecute        = false,
+            CreateNoWindow         = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding  = Encoding.UTF8
+        };
+        try
+        {
+            using var proc = Process.Start(psi)!;
+            var stdout = await proc.StandardOutput.ReadToEndAsync();
+            var stderr = await proc.StandardError.ReadToEndAsync();
+            await proc.WaitForExitAsync();
+            var result = stdout.Trim();
+            if (!string.IsNullOrWhiteSpace(stderr)) result += (result.Length > 0 ? "\n" : "") + stderr.Trim();
+            return string.IsNullOrWhiteSpace(result) ? $"✓ (exit: {proc.ExitCode})" : result;
+        }
+        catch (Exception ex) { return Err($"git topilmadi: {ex.Message}"); }
+    }
+
+    private static async Task<string> RunInstallPackage(string manager, string package)
+    {
+        if (string.IsNullOrWhiteSpace(package)) return Err("Paket nomi ko'rsatilmadi");
+        var cmd = manager.ToLower() switch
+        {
+            "pip" or "pip3"  => $"pip install {package}",
+            "npm"            => $"npm install {package}",
+            "yarn"           => $"yarn add {package}",
+            "dotnet"         => $"dotnet add package {package}",
+            "go"             => $"go get {package}",
+            "cargo"          => $"cargo add {package}",
+            "flutter"        => $"flutter pub add {package}",
+            "dart"           => $"dart pub add {package}",
+            _                => $"{manager} install {package}"
+        };
+        return await RunCmd(cmd);
+    }
+
+    private static async Task<string> RunScript(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return Err("Fayl yo'li ko'rsatilmadi");
+        if (!File.Exists(path)) return Err($"Fayl topilmadi: {path}");
+        var ext = Path.GetExtension(path).ToLower();
+        return ext switch
+        {
+            ".py"  => await RunPythonCode(await File.ReadAllTextAsync(path)),
+            ".js"  => await RunProcessAsync("node", $"\"{path}\""),
+            ".ts"  => await RunProcessAsync("npx", $"ts-node \"{path}\""),
+            ".ps1" => await RunPowershell($"& \"{path}\""),
+            ".bat" => await RunCmd($"\"{path}\""),
+            ".sh"  => await RunProcessAsync("bash", $"\"{path}\""),
+            ".dart"=> await RunProcessAsync("dart", $"run \"{path}\""),
+            ".go"  => await RunProcessAsync("go", $"run \"{path}\""),
+            _      => await RunCmd($"\"{path}\"")
+        };
+    }
 
     private static async Task<string> RunGoCode(string code)
     {
