@@ -1,0 +1,16 @@
+  Определение проектов для восстановления...
+  Все проекты обновлены для восстановления.
+  WA.Agent -> C:\Users\Сomp X\dev-studio\src\WA.Agent\bin\Release\net8.0-windows\WA.Agent.dll
+C:\Users\Сomp X\dev-studio\src\WA.App\Controls\ChatBubble.cs(103,14): error CS1061: "MarkdownPipelineBuilder" не содержит определения "UseAdvancedExtensions", и не удалось найти доступный метод расширения "UseAdvancedExtensions", принимающий тип "MarkdownPipelineBuilder" в качестве первого аргумента (возможно, пропущена директива using или ссылка на сборку). [C:\Users\Сomp X\dev-studio\src\WA.App\WA.App.csproj]
+C:\Users\Сomp X\dev-studio\src\WA.App\Views\MainWindow.xaml.cs(800,19): warning CS8602: Разыменование вероятной пустой ссылки. [C:\Users\Сomp X\dev-studio\src\WA.App\WA.App.csproj]
+C:\Users\Сomp X\dev-studio\src\WA.App\Controls\ChatBubble.cs(20,22): warning CS0649: Полю "ChatBubble._mainBox" нигде не присваивается значение, поэтому оно всегда будет иметь значение по умолчанию null. [C:\Users\Сomp X\dev-studio\src\WA.App\WA.App.csproj]
+
+Ошибка сборки.
+
+C:\Users\Сomp X\dev-studio\src\WA.App\Views\MainWindow.xaml.cs(800,19): warning CS8602: Разыменование вероятной пустой ссылки. [C:\Users\Сomp X\dev-studio\src\WA.App\WA.App.csproj]
+C:\Users\Сomp X\dev-studio\src\WA.App\Controls\ChatBubble.cs(20,22): warning CS0649: Полю "ChatBubble._mainBox" нигде не присваивается значение, поэтому оно всегда будет иметь значение по умолчанию null. [C:\Users\Сomp X\dev-studio\src\WA.App\WA.App.csproj]
+C:\Users\Сomp X\dev-studio\src\WA.App\Controls\ChatBubble.cs(103,14): error CS1061: "MarkdownPipelineBuilder" не содержит определения "UseAdvancedExtensions", и не удалось найти доступный метод расширения "UseAdvancedExtensions", принимающий тип "MarkdownPipelineBuilder" в качестве первого аргумента (возможно, пропущена директива using или ссылка на сборку). [C:\Users\Сomp X\dev-studio\src\WA.App\WA.App.csproj]
+    Предупреждений: 2
+    Ошибок: 1
+
+Прошло времени 00:00:03.10

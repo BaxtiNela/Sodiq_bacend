@@ -11,14 +11,17 @@ RUN pip install --no-cache-dir \
     "llama-cpp-python[server]" \
     --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
 
+ARG LLM_MODEL=qwen2.5-coder-7b-instruct-q4_k_m.gguf
+ENV LLM_MODEL=${LLM_MODEL}
+
 EXPOSE 8080
 
-CMD ["python", "-m", "llama_cpp.server", \
-     "--model", "/models/qwen2.5-7b-q4_k_m.gguf", \
-     "--host", "0.0.0.0", \
-     "--port", "8080", \
-     "--n_ctx", "4096", \
-     "--n_threads", "8", \
-     "--n_gpu_layers", "35", \
-     "--n_batch", "512", \
-     "--chat_format", "chatml"]
+CMD python -m llama_cpp.server \
+    --model /models/${LLM_MODEL} \
+    --host 0.0.0.0 \
+    --port 8080 \
+    --n_ctx 4096 \
+    --n_threads 8 \
+    --n_gpu_layers 35 \
+    --n_batch 512 \
+    --chat_format chatml

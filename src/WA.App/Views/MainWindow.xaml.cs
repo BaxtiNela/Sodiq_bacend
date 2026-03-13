@@ -1315,6 +1315,19 @@ public partial class MainWindow : Window
         }
     }
 
+    private void TerminalRun_Click(object sender, RoutedEventArgs e)
+    {
+        var cmd = TerminalInput.Text.Trim();
+        TerminalInput.Clear();
+        if (string.IsNullOrEmpty(cmd)) { TerminalInput.Focus(); return; }
+        _cmdHistory.Insert(0, cmd);
+        _cmdHistoryIdx = -1;
+        AppendTerminal($"PS > {cmd}\n", "#4ec9b0");
+        if (_terminalProcess == null || _terminalProcess.HasExited) StartTerminal();
+        _terminalProcess!.StandardInput.WriteLine(cmd);
+        TerminalInput.Focus();
+    }
+
     private void ClearTerminal_Click(object sender, RoutedEventArgs e)
     {
         TerminalOutput.Document.Blocks.Clear();
@@ -2055,11 +2068,7 @@ public partial class MainWindow : Window
     {
         Hide();
         if (_notifyIcon != null) _notifyIcon.Visibility = Visibility.Visible;
-        if (_miniWidget != null && _miniWidget.IsVisible) return; // allaqachon bor
-        _miniWidget?.Close();
-        _miniWidget = new MiniWidget(this);
-        _miniWidget.Closed += (s, e) => _miniWidget = null;
-        _miniWidget.Show();
+        // MiniWidget ko'rsatilmaydi — ilova faqat tray iconida ishlaydi
     }
 
     public void RestoreFromTray()

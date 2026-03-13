@@ -44,6 +44,8 @@ public class LocalLlmClient
         - Call only ONE tool at a time.
         - After receiving a tool result, either call the next tool OR write the final answer.
         - Never repeat the same tool call with the same arguments.
+        - NEVER ask the user for permission, confirmation, or consent. Execute tasks directly.
+        - NEVER say "rozilik bildiring", "tasdiqlang", "confirm" or similar. Just do it.
 
         TOOL SELECTION:
         - Open app → open_app(name)  [telegram, chrome, firefox, edge, notepad, vscode, explorer]
@@ -55,6 +57,12 @@ public class LocalLlmClient
         - Find files → search_files(path, pattern)
         - Run CMD → run_command(cmd)
         - Run PowerShell → run_powershell(script)
+        - Run Python code → run_python(code)
+        - Run Node.js / JavaScript → run_node(code)
+        - Run Go code → run_go(code)
+        - Run Java code → run_java(code)
+        - Run Dart/Flutter → run_dart(code)
+        - Run C# script → run_csharp(code)
         - System info → get_system_info(type)
         - Screenshot → take_screenshot()
         - Clipboard → get_clipboard() / set_clipboard(text)

@@ -35,6 +35,14 @@ public class ToolExecutor
                 "run_command"    => await RunCmd(Get("command")),
                 "run_powershell" => await RunPowershell(Get("script") is { Length: > 0 } s ? s : Get("command")),
 
+                // ── Dasturlash tillari ──
+                "run_python"  => await RunCmd($"python -c \"{EscapeForCmd(Get("code"))}\""),
+                "run_node"    => await RunCmd($"node -e \"{EscapeForCmd(Get("code"))}\""),
+                "run_go"      => await RunGoCode(Get("code")),
+                "run_java"    => await RunJavaCode(Get("code")),
+                "run_dart"    => await RunCmd($"dart run --stdin \"{EscapeForCmd(Get("code"))}\""),
+                "run_csharp"  => await RunCSharpCode(Get("code")),
+
                 // ── Fayl ──
                 "read_file"      => ReadFile(Get("path")),
                 "write_file"     => WriteFile(Get("path"), Get("content")),
@@ -603,6 +611,79 @@ Write-Output ""Ovoz: $volume%""
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    // ══════════════════════════════════════════════════════════
+    // DASTURLASH TILLARI
+    // ══════════════════════════════════════════════════════════
+
+    private static string EscapeForCmd(string code)
+        => code.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "\\n");
+
+    private static async Task<string> RunGoCode(string code)
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), $"wa_go_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tmp);
+        var file = Path.Combine(tmp, "main.go");
+        await File.WriteAllTextAsync(file, code);
+        var result = await RunProcessAsync("go", $"run \"{file}\"");
+        Directory.Delete(tmp, true);
+        return result;
+    }
+
+    private static async Task<string> RunJavaCode(string code)
+    {
+        // Class nomini topib vaqtinchalik fayl yaratamiz
+        var className = "Main";
+        var match = System.Text.RegularExpressions.Regex.Match(code, @"public\s+class\s+(\w+)");
+        if (match.Success) className = match.Groups[1].Value;
+
+        var tmp  = Path.Combine(Path.GetTempPath(), $"wa_java_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tmp);
+        var file = Path.Combine(tmp, $"{className}.java");
+        await File.WriteAllTextAsync(file, code);
+        var compile = await RunProcessAsync("javac", $"\"{file}\"");
+        if (compile.Contains("[Xato]")) { Directory.Delete(tmp, true); return compile; }
+        var run = await RunProcessAsync("java", $"-cp \"{tmp}\" {className}");
+        Directory.Delete(tmp, true);
+        return run;
+    }
+
+    private static async Task<string> RunCSharpCode(string code)
+    {
+        // dotnet-script yoki csc bilan ishlatamiz
+        var tmp  = Path.Combine(Path.GetTempPath(), $"wa_cs_{Guid.NewGuid():N}.csx");
+        await File.WriteAllTextAsync(tmp, code);
+        var result = await RunProcessAsync("dotnet-script", $"\"{tmp}\"");
+        File.Delete(tmp);
+        return result;
+    }
+
+    private static async Task<string> RunProcessAsync(string exe, string args, int timeoutMs = 30000)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo(exe, args)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError  = true,
+                UseShellExecute        = false,
+                CreateNoWindow         = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding  = Encoding.UTF8
+            };
+            using var proc = Process.Start(psi)!;
+            var outTask = proc.StandardOutput.ReadToEndAsync();
+            var errTask = proc.StandardError.ReadToEndAsync();
+            var completed = await Task.WhenAny(proc.WaitForExitAsync(), Task.Delay(timeoutMs));
+            if (!proc.HasExited) { proc.Kill(true); return Err($"Timeout ({timeoutMs/1000}s)"); }
+            var stdout = await outTask;
+            var stderr = await errTask;
+            var result = stdout.Trim();
+            if (!string.IsNullOrWhiteSpace(stderr)) result += $"\n[STDERR] {stderr.Trim()}";
+            return string.IsNullOrWhiteSpace(result) ? $"✓ (exit: {proc.ExitCode})" : result;
+        }
+        catch (Exception ex) { return Err($"{exe} topilmadi yoki xato: {ex.Message}"); }
+    }
 
     // ── Helpers ──
 

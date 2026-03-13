@@ -321,6 +321,31 @@ public class AssistantHub(
             Props(P("script", "PowerShell kodi")),
             ["script"]),
 
+        // ── Dasturlash tillari ──
+        Tool("run_python", "Python kodni bajarish (python3 kerak)",
+            Props(P("code", "Python kodi")),
+            ["code"]),
+
+        Tool("run_node", "Node.js / JavaScript kodni bajarish",
+            Props(P("code", "JavaScript kodi")),
+            ["code"]),
+
+        Tool("run_go", "Go kodni bajarish (go run)",
+            Props(P("code", "Go kodi")),
+            ["code"]),
+
+        Tool("run_java", "Java kodni bajarish (javac + java)",
+            Props(P("code", "Java kodi")),
+            ["code"]),
+
+        Tool("run_dart", "Dart yoki Flutter kodni bajarish",
+            Props(P("code", "Dart kodi")),
+            ["code"]),
+
+        Tool("run_csharp", "C# script bajarish (dotnet-script yoki csc)",
+            Props(P("code", "C# kodi")),
+            ["code"]),
+
         // ── Fayl operatsiyalari ──
         Tool("read_file", "Fayl mazmunini o'qish",
             Props(P("path", "Fayl yo'li")),
