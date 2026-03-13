@@ -72,6 +72,12 @@ public class LocalLlmClient
         - If yes → write final answer
         - If no → call the next needed tool
         - If tool failed → try alternative approach, do not retry the exact same call
+
+        CONTEXT AWARENESS:
+        - The LAST user message in the conversation is the CURRENT request. Focus ONLY on that.
+        - Previous tool calls from earlier turns are already done. Do NOT repeat them for a new unrelated request.
+        - Each new user message is a completely fresh task. Treat it independently.
+        - If the current message is about web, coding, or something unrelated to the previous topic, address it directly.
         """;
 
     // Fallback model zanjiri: birinchi limit tugasa keyingisi ishlatiladi

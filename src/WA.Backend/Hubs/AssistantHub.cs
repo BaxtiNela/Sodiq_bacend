@@ -61,7 +61,7 @@ public class AssistantHub(
             var systemMsg = ollama.BuildSystemMessage(contextBlock);
 
             // Barcha xabarlarni yig'ish (session tarixi)
-            // tool xabarlarini o'tkazib yuboramiz — ularda tool_call_id kerak, eski DB da yo'q
+            // Faqat user/assistant — tool xabarlari Groq formatini buzadi
             // Har bir xabarni 1500 belgiga cheklaymiz — token limitini oshirmaslik uchun
             var history = conv.Messages
                 .OrderBy(m => m.CreatedAt)
