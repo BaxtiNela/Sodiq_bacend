@@ -11,7 +11,7 @@ namespace WA.Backend.Services;
 /// </summary>
 public class LearningService(
     AppDbContext db,
-    OllamaBackendClient ollama,
+    LocalLlmClient ollama,
     MemoryBackendService memory,
     ILogger<LearningService> logger)
 {

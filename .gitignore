@@ -1,9 +1,18 @@
 # Build outputs & large binaries
 publish/
 publish2/
+publish_out/
+publish_sodiq/
 **/bin/
 **/obj/
 models/*.gguf
+*.gguf
+*.pdb
+
+# Secrets — NEVER commit
+.env
+.env.*
+!.env.example
 
 # Logs
 logs
@@ -39,4 +48,3 @@ yarn.lock
 /playwright-report/
 /playwright/.cache/
 
-.github/workflows/

@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.IO;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows;
@@ -8,6 +10,7 @@ using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 using Microsoft.AspNetCore.SignalR.Client;
+using NAudio.Wave;
 using WA.Agent.Services;
 using WA.App.Controls;
 using WA.App.Services;
@@ -27,13 +30,24 @@ public partial class MainWindow : Window
 
     private HubConnection? _hub;
     private string _sessionId = GenerateSessionId();
-    private string _currentModel = "qwen2.5:7b";
+    private string _currentModel = "llama-4-scout";
+
+    // System tray + mini widget
+    private H.NotifyIcon.TaskbarIcon? _notifyIcon;
+    private MiniWidget? _miniWidget;
+
+    // Voice recording (Groq Whisper)
+    private WaveInEvent?   _waveIn;
+    private MemoryStream?  _audioStream;
+    private WaveFileWriter? _waveWriter;
+    private bool _isRecording;
     private bool _isBusy;
     private bool _isAutoMode;
     private string? _currentEditorPath;
     private CancellationTokenSource? _extApiCts;
 
-    private ChatBubble? _streamBubble;
+    private ChatBubble?          _streamBubble;
+    private AgentResponseBubble? _agentBubble;
     private readonly System.Text.StringBuilder _streamBuffer = new();
 
     // Biriktirilgan fayllar ro'yxati (multi-file context uchun)
@@ -63,8 +77,10 @@ public partial class MainWindow : Window
         _chatStore        = new LocalChatStore(DataDir);
         _apiKeyStore      = new ApiKeyStore(DataDir);
         _userProfileStore = new UserProfileStore(DataDir);
-        Loaded  += OnLoaded;
-        Closing += OnClosing;
+        Loaded       += OnLoaded;
+        Closing      += OnClosing;
+        StateChanged += OnStateChanged;
+        InitTrayIcon();
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -75,7 +91,15 @@ public partial class MainWindow : Window
             AddMessage(MessageRole.System, $"⚠ Monaco editor yuklanmadi: {ex.Message}\nWebView2 Runtime o'rnatilganligini tekshiring.");
         }
 
-        try { RefreshFileTree(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)); }
+        try
+        {
+            var savedPath = File.Exists(TreePathFile) ? File.ReadAllText(TreePathFile).Trim() : null;
+            var treePath  = !string.IsNullOrEmpty(savedPath) &&
+                            (Directory.Exists(savedPath) || File.Exists(Path.GetDirectoryName(savedPath) ?? ""))
+                            ? savedPath
+                            : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            RefreshFileTree(treePath);
+        }
         catch { }
 
         // Oxirgi sessionni tiklash
@@ -85,6 +109,8 @@ public partial class MainWindow : Window
             AddSessionTab(_sessionId, "Sessiya 1", activate: false);
         UpdateSessionTabsUI();
 
+        LoadApiKeysFromEnv();
+        RestoreAttachedFiles();
         await ConnectToBackendAsync();
 
         // Foydalanuvchi ro'yxatdan o'tganmi?
@@ -102,6 +128,8 @@ public partial class MainWindow : Window
 
     private async void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
+        _notifyIcon?.Dispose();
+        _miniWidget?.Close();
         if (_hub != null) await _hub.DisposeAsync();
         try { _terminalProcess?.Kill(entireProcessTree: true); } catch { }
         _terminalProcess?.Dispose();
@@ -128,6 +156,14 @@ public partial class MainWindow : Window
                 {
                     SetStatus(status);
                     AiPanelStatus.Text = status;
+                    // AgentResponseBubble lazy create
+                    if (_agentBubble == null)
+                    {
+                        _agentBubble = new AgentResponseBubble();
+                        MessagesPanel.Children.Add(_agentBubble);
+                        ChatScroll.ScrollToEnd();
+                    }
+                    _agentBubble.SetThinking(status);
                 }));
 
             _hub.On<string, string, string>("ToolCallRequest", async (callId, toolName, argsJson) =>
@@ -136,37 +172,37 @@ public partial class MainWindow : Window
                 try { argsDict = JsonSerializer.Deserialize<Dictionary<string, object?>>(argsJson) ?? []; }
                 catch { argsDict = []; }
 
-                // 1. Activity bubble qo'shish (ishlayotgan holat)
-                ToolActivityBubble? actBubble = null;
+                // 1. AgentResponseBubble'ga step qo'shish
+                AgentResponseBubble.IAgentStep? step = null;
                 await Dispatcher.InvokeAsync(() =>
                 {
                     var preview = ToolActivityBubble.FormatArgsPreview(toolName, argsDict);
-                    actBubble = new ToolActivityBubble(toolName, preview);
-                    MessagesPanel.Children.Add(actBubble);
-                    ChatScroll.ScrollToEnd();
-                    // Activity bar yangilash
                     ActivityText.Text = $"{toolName}  {preview}";
+                    if (_agentBubble == null)
+                    {
+                        _agentBubble = new AgentResponseBubble();
+                        MessagesPanel.Children.Add(_agentBubble);
+                    }
+                    step = _agentBubble.BeginStep(toolName, argsDict);
+                    ChatScroll.ScrollToEnd();
                 });
 
                 // 2. write_file uchun ruxsat so'rash (FAQAT Ask rejimida)
                 if (toolName == "write_file" && !_isAutoMode)
                 {
                     string Get(string k) => argsDict.TryGetValue(k, out var v) ? v?.ToString() ?? "" : "";
-                    var filePath    = Get("path");
-                    var fileContent = Get("content");
-
                     EditPermissionBubble? permBubble = null;
                     await Dispatcher.InvokeAsync(() =>
                     {
-                        permBubble = new EditPermissionBubble(filePath, fileContent);
+                        permBubble = new EditPermissionBubble(Get("path"), Get("content"));
                         MessagesPanel.Children.Add(permBubble);
                         ChatScroll.ScrollToEnd();
                     });
-
                     var allowed = await permBubble!.Decision;
                     if (!allowed)
                     {
-                        actBubble?.SetDone("Foydalanuvchi rad etdi", success: false);
+                        var sw0 = System.Diagnostics.Stopwatch.StartNew();
+                        step?.Complete("Foydalanuvchi rad etdi", false, sw0.ElapsedMilliseconds);
                         if (_hub?.State == HubConnectionState.Connected)
                             await _hub.InvokeAsync("SendToolResult", _sessionId, callId, toolName,
                                 "Foydalanuvchi fayl tahrirlashni rad etdi");
@@ -174,24 +210,24 @@ public partial class MainWindow : Window
                     }
                 }
 
-                // 3. Tool bajarish
+                // 3. Tool bajarish (vaqtni o'lchash)
+                var sw     = System.Diagnostics.Stopwatch.StartNew();
                 var call   = new WA.Agent.Models.ToolCall(callId, toolName, argsDict);
                 var result = await _executor.ExecuteAsync(call);
-                var ok     = !result.StartsWith("Xato") && !result.StartsWith("CMD xato") && !result.StartsWith("PowerShell xato");
+                sw.Stop();
+                var ok = !result.StartsWith("Xato") && !result.StartsWith("CMD xato") && !result.StartsWith("PowerShell xato");
 
-                actBubble?.SetDone(result, ok);
+                step?.Complete(result, ok, sw.ElapsedMilliseconds);
 
-                // Terminal mirroring — agent command output → terminal panel
+                // Terminal mirroring
                 await Dispatcher.InvokeAsync(() => MirrorToolToTerminal(toolName, argsJson, result));
 
-                // 4. write_file muvaffaqiyatli bo'lsa — editorda yangilash + qatorlarni belgilash
+                // 4. write_file → editor yangilash
                 if (toolName == "write_file" && ok)
                 {
                     string Get2(string k) => argsDict.TryGetValue(k, out var v) ? v?.ToString() ?? "" : "";
-                    var writtenPath    = Get2("path");
-                    var writtenContent = Get2("content");
                     await Dispatcher.InvokeAsync(async () =>
-                        await RefreshEditorAfterWrite(writtenPath, writtenContent));
+                        await RefreshEditorAfterWrite(Get2("path"), Get2("content")));
                 }
 
                 if (_hub?.State == HubConnectionState.Connected)
@@ -199,10 +235,40 @@ public partial class MainWindow : Window
             });
 
             _hub.On<string>("StreamToken", token =>
-                Dispatcher.InvokeAsync(() => AppendStreamToken(token)));
+                Dispatcher.InvokeAsync(() =>
+                {
+                    _streamBuffer.Append(token);
+                    if (_agentBubble != null)
+                    {
+                        _agentBubble.AppendToken(token);
+                        ChatScroll.ScrollToEnd();
+                    }
+                    else
+                    {
+                        AppendStreamToken(token);
+                    }
+                }));
 
             _hub.On<string, string>("FinalResponse", (content, _) =>
-                Dispatcher.InvokeAsync(() => OnFinalResponse(content)));
+                Dispatcher.InvokeAsync(() =>
+                {
+                    if (_agentBubble != null)
+                    {
+                        _agentBubble.Finalize(_currentModel, content);
+                        _chatStore.SaveMessage(_sessionId, "assistant", content, _currentModel);
+                        _agentBubble  = null;
+                        _streamBubble = null;
+                        _streamBuffer.Clear();
+                        SetBusy(false);
+                        SetStatus("Tayyor");
+                        AiPanelStatus.Text = "AI Agent";
+                        ChatScroll.ScrollToEnd();
+                    }
+                    else
+                    {
+                        OnFinalResponse(content);
+                    }
+                }));
 
             _hub.On<string>("Error", err =>
                 Dispatcher.InvokeAsync(() =>
@@ -228,10 +294,12 @@ public partial class MainWindow : Window
             await LoadModels();
             SetStatus("Tayyor");
             AiPanelStatus.Text = "AI Agent";
-            AddMessage(MessageRole.Assistant,
-                "Salom! Har qanday buyruq bering — o'zim bajaraman.\n" +
-                "Papka tashlash: fayl daraxti chapda ko'rsatiladi.\n" +
-                "Fayl ustiga ikki marta bosing — redaktorda ochiladi.", _currentModel);
+            // Faqat birinchi ulanishda (sessiyada xabar yo'q bo'lsa) salom ko'rsat
+            if (MessagesPanel.Children.Count == 0)
+                AddMessage(MessageRole.Assistant,
+                    "Salom! Har qanday buyruq bering — o'zim bajaraman.\n" +
+                    "Papka tashlash: fayl daraxti chapda ko'rsatiladi.\n" +
+                    "Fayl ustiga ikki marta bosing — redaktorda ochiladi.", _currentModel);
         }
         catch (Exception ex)
         {
@@ -242,42 +310,23 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task LoadModels()
+    private Task LoadModels()
     {
-        try
-        {
-            using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-            var json = await http.GetStringAsync("http://localhost:11434/api/tags");
-            using var doc = JsonDocument.Parse(json);
-            var models = doc.RootElement.GetProperty("models")
-                .EnumerateArray()
-                .Select(m => m.GetProperty("name").GetString() ?? "")
-                .Where(m => !string.IsNullOrEmpty(m))
-                .ToList();
+        ModelCombo.Items.Clear();
+        AddComboHeader("⚡  Groq (bepul bulut)");
+        AddComboModel("llama-4-scout",    "Llama 4 Scout  · vision + tools");
+        AddComboModel("llama-3.3-70b",    "Llama 3.3 70B  · kuchli");
+        AddComboModel("qwen-3-32b",       "Qwen 3 32B     · coding");
+        AddComboHeader("💳  To'lovli");
+        AddComboModel("deepseek-chat",    "DeepSeek Chat");
+        AddComboModel("gpt-4o",           "GPT-4o");
 
-            await Dispatcher.InvokeAsync(() =>
-            {
-                ModelCombo.Items.Clear();
-                // Ollama local models
-                if (models.Count == 0) ModelCombo.Items.Add("qwen2.5:7b");
-                else foreach (var m in models) ModelCombo.Items.Add(m);
-                // External (paid API)
-                ModelCombo.Items.Add("deepseek-chat");
-                ModelCombo.Items.Add("gpt-4o");
-
-                ModelCombo.SelectedItem = ModelCombo.Items.Contains(_currentModel)
-                    ? _currentModel
-                    : ModelCombo.Items[0];
-
-                if (ModelCombo.SelectedItem is string sel) _currentModel = sel;
-            });
-        }
-        catch
-        {
-            ModelCombo.Items.Clear();
-            ModelCombo.Items.Add("qwen2.5:7b");
-            ModelCombo.SelectedIndex = 0;
-        }
+        var toSelect = ModelCombo.Items.OfType<ComboBoxItem>()
+            .FirstOrDefault(i => i.IsEnabled && i.Tag?.ToString() == _currentModel)
+            ?? ModelCombo.Items.OfType<ComboBoxItem>().FirstOrDefault(i => i.IsEnabled);
+        ModelCombo.SelectedItem = toSelect;
+        if (toSelect?.Tag is string sel) _currentModel = sel;
+        return Task.CompletedTask;
     }
 
     // ═══════════════════════════════════════════
@@ -305,6 +354,7 @@ public partial class MainWindow : Window
         SetBusy(true);
         _streamBuffer.Clear();
         _streamBubble = null;
+        _agentBubble  = null;
 
         // Fayl/papka kontekstini qo'shish (UI da ko'rinmaydi, backendga boradi)
         var backendText = BuildMessageWithContext(text);
@@ -442,6 +492,7 @@ public partial class MainWindow : Window
         finally
         {
             _streamBubble = null;
+            _agentBubble  = null;
             _streamBuffer.Clear();
             _extApiCts = null;
             SetBusy(false);
@@ -459,16 +510,18 @@ public partial class MainWindow : Window
     {
         const int MaxRounds = 15;
         const string SystemPrompt =
-            "Sen Windows kompyuterni MUSTAQIL boshqaruvchi AI agentsan.\n" +
-            "FIKRLASH TARTIBI (ReAct):\n" +
-            "1. TAHLIL — Vazifani tushun, kerakli toolni tanla\n" +
-            "2. HARAKAT — Tool ishlatib vazifani boshlash\n" +
-            "3. KUZAT — Natijani ko'r, xato bo'lsa tuzat\n" +
-            "4. YAKUN — Foydalanuvchiga faqat foydali natijani qisqa yoz\n\n" +
-            "QATTIQ QOIDALAR:\n" +
-            "- HECH QACHON 'siz qiling', 'bosing' dema — O'ZING qil\n" +
-            "- Xato bo'lsa muqobil yo'l bil, baribir natija chiqar\n" +
-            "- Internet kerakmi → web_search → read_url ketma-ket ishlat";
+            "Sen Windows kompyuterni MUSTAQIL boshqaruvchi AI agentsan.\n\n" +
+            "ASOSIY QOIDA: Tool ni DARHOL chaqir. Avval hech narsa yozma.\n" +
+            "HECH QACHON 'siz qiling', 'bosing', 'tahlil:', 'harakat:' yozma — faqat tool chaqir.\n\n" +
+            "TOOL TANLASH:\n" +
+            "- Dastur ochish → open_app(name)  [telegram, chrome, firefox, notepad ...]\n" +
+            "- Veb ochish → run_command(\"start https://...\")\n" +
+            "- Internet → web_search(query) → read_url(url)\n" +
+            "- CMD → run_command(cmd)\n" +
+            "- PowerShell → run_powershell(script)\n" +
+            "- Fayl → read_file / write_file / list_directory\n" +
+            "- Tizim → get_system_info / get_time / get_env\n" +
+            "XATO BO'LSA: muqobil tool bil, qayta ur.";
 
         // Sessiya tarixini yuklash
         var messages = new List<JsonObject>();
@@ -489,23 +542,39 @@ public partial class MainWindow : Window
         for (int round = 0; round < MaxRounds; round++)
         {
             ct.ThrowIfCancellationRequested();
+            var statusText = round == 0
+                ? $"{ExternalApiClient.ProviderLabel(model)} o'ylayapti..."
+                : $"{ExternalApiClient.ProviderLabel(model)} davom etmoqda... ({round})";
             await Dispatcher.InvokeAsync(() =>
             {
-                SetStatus(round == 0
-                    ? $"{ExternalApiClient.ProviderLabel(model)} o'ylayapti..."
-                    : $"{ExternalApiClient.ProviderLabel(model)} davom etmoqda... ({round})");
+                SetStatus(statusText);
+                if (_agentBubble == null)
+                {
+                    _agentBubble = new AgentResponseBubble();
+                    MessagesPanel.Children.Add(_agentBubble);
+                    ChatScroll.ScrollToEnd();
+                }
+                _agentBubble.SetThinking(statusText);
             });
 
             var turn = await _extClient.ChatWithToolsAsync(model, apiKey, messages, ct);
 
             if (!turn.HasToolCalls)
             {
-                // Yakuniy javob — token-by-token ko'rsatish
+                // Yakuniy javob — token-by-token AgentResponseBubble'ga
                 finalResponse = turn.Content ?? string.Empty;
                 foreach (var chunk in ChunkString(finalResponse, 15))
                 {
                     ct.ThrowIfCancellationRequested();
-                    await Dispatcher.InvokeAsync(() => AppendStreamToken(chunk));
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        _streamBuffer.Append(chunk);
+                        if (_agentBubble != null)
+                            _agentBubble.AppendToken(chunk);
+                        else
+                            AppendStreamToken(chunk);
+                        ChatScroll.ScrollToEnd();
+                    });
                     await Task.Delay(10, ct);
                 }
                 break;
@@ -524,15 +593,15 @@ public partial class MainWindow : Window
                 try { args = JsonSerializer.Deserialize<Dictionary<string, object?>>(tc.ArgsJson) ?? []; }
                 catch { args = []; }
 
-                // UI: tool activity bubble
-                ToolActivityBubble? actBubble = null;
+                // AgentResponseBubble ga step qo'shish
+                AgentResponseBubble.IAgentStep? step = null;
                 await Dispatcher.InvokeAsync(() =>
                 {
                     var preview = ToolActivityBubble.FormatArgsPreview(tc.Name, args);
-                    actBubble   = new ToolActivityBubble(tc.Name, preview);
-                    MessagesPanel.Children.Add(actBubble);
-                    ChatScroll.ScrollToEnd();
                     SetStatus($"Tool: {tc.Name}...");
+                    ActivityText.Text = $"{tc.Name}  {preview}";
+                    step = _agentBubble?.BeginStep(tc.Name, args);
+                    ChatScroll.ScrollToEnd();
                 });
 
                 // write_file uchun ruxsat (Ask rejimida)
@@ -549,7 +618,7 @@ public partial class MainWindow : Window
                     var allowed = await permBubble!.Decision;
                     if (!allowed)
                     {
-                        actBubble?.SetDone("Foydalanuvchi rad etdi", success: false);
+                        step?.Complete("Foydalanuvchi rad etdi", false, 0);
                         messages.Add(new JsonObject
                         {
                             ["role"]         = "tool",
@@ -560,13 +629,15 @@ public partial class MainWindow : Window
                     }
                 }
 
+                var swExt  = System.Diagnostics.Stopwatch.StartNew();
                 var call   = new WA.Agent.Models.ToolCall(tc.Id, tc.Name, args);
                 var result = await _executor.ExecuteAsync(call);
+                swExt.Stop();
                 var ok     = !result.StartsWith("Xato") && !result.StartsWith("[Xato]");
 
+                step?.Complete(result, ok, swExt.ElapsedMilliseconds);
                 await Dispatcher.InvokeAsync(() =>
                 {
-                    actBubble?.SetDone(result, ok);
                     MirrorToolToTerminal(tc.Name, tc.ArgsJson, result);
 
                     // write_file → editor yangilash
@@ -588,10 +659,10 @@ public partial class MainWindow : Window
         }
 
         if (string.IsNullOrEmpty(finalResponse))
-        {
             finalResponse = "Maksimal qadam soniga yetildi.";
-            await Dispatcher.InvokeAsync(() => AppendStreamToken(finalResponse));
-        }
+
+        // AgentResponseBubble'ni yakunlash
+        await Dispatcher.InvokeAsync(() => _agentBubble?.Finalize(model, finalResponse));
 
         // Saqlash + learning
         _chatStore.SaveMessage(_sessionId, "assistant", finalResponse, model);
@@ -934,6 +1005,10 @@ public partial class MainWindow : Window
     // FILE TREE
     // ═══════════════════════════════════════════
 
+    private static readonly string TreePathFile =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                     "WindowsAssistant", "last_tree_path.txt");
+
     private void RefreshFileTree(string rootPath)
     {
         FileTree.Items.Clear();
@@ -941,6 +1016,7 @@ public partial class MainWindow : Window
         {
             var root = CreateTreeNode(rootPath, expand: false);
             FileTree.Items.Add(root);
+            try { File.WriteAllText(TreePathFile, rootPath); } catch { }
         }
         catch { }
     }
@@ -1007,6 +1083,7 @@ public partial class MainWindow : Window
     private void ClearContext_Click(object sender, RoutedEventArgs e)
     {
         _attachedFiles.Clear();
+        SaveAttachedFiles();
         AttachedFilesPanel.Children.Clear();
         // AnalyzeBtn belongs to AttachedFilesPanel, re-add it
         AttachedFilesPanel.Children.Add(AnalyzeBtn);
@@ -1014,16 +1091,39 @@ public partial class MainWindow : Window
         AnalyzeBtn.Visibility          = Visibility.Collapsed;
     }
 
+    private static readonly string AttachedFilesStatePath =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                     "WindowsAssistant", "attached_files.json");
+
+    private void SaveAttachedFiles() =>
+        File.WriteAllText(AttachedFilesStatePath,
+            System.Text.Json.JsonSerializer.Serialize(_attachedFiles));
+
+    private void RestoreAttachedFiles()
+    {
+        if (!File.Exists(AttachedFilesStatePath)) return;
+        try
+        {
+            var paths = System.Text.Json.JsonSerializer.Deserialize<List<string>>(
+                File.ReadAllText(AttachedFilesStatePath)) ?? [];
+            foreach (var p in paths.Where(File.Exists).Concat(paths.Where(Directory.Exists)))
+                AttachFile(p);
+        }
+        catch { }
+    }
+
     private void AttachFile(string path)
     {
         if (_attachedFiles.Contains(path) || _attachedFiles.Count >= 5) return;
         _attachedFiles.Add(path);
         AddFileChip(path);
+        SaveAttachedFiles();
     }
 
     private void RemoveAttachment(string path)
     {
         _attachedFiles.Remove(path);
+        SaveAttachedFiles();
         var chip = AttachedFilesPanel.Children.OfType<Border>()
             .FirstOrDefault(b => b.Tag?.ToString() == path);
         if (chip != null) AttachedFilesPanel.Children.Remove(chip);
@@ -1170,9 +1270,16 @@ public partial class MainWindow : Window
     private void MirrorToolToTerminal(string toolName, string argsJson, string result)
     {
         if (!_terminalTools.Contains(toolName)) return;
-        if (TerminalPanel.Visibility != Visibility.Visible) return;
+
+        // Auto-open terminal if closed
+        if (TerminalPanel.Visibility != Visibility.Visible)
+        {
+            ToggleTerminal();
+        }
+
         AppendTerminal($"\n[Agent → {toolName}]\n", "#569cd6");
         AppendTerminal(result.TrimEnd() + "\n", "#d4d4d4");
+        TerminalScroll.ScrollToEnd();
     }
 
     private void TerminalInput_KeyDown(object sender, KeyEventArgs e)
@@ -1411,16 +1518,162 @@ public partial class MainWindow : Window
         foreach (var f in dlg.FileNames) AttachFile(f);
     }
 
-    private void Voice_Click(object sender, RoutedEventArgs e) =>
-        AddMessage(MessageRole.System, "Ovozli input tez kunda...");
+    private void Voice_Click(object sender, RoutedEventArgs e) => ToggleVoiceRecording();
 
-    private async void Cancel_Click(object sender, RoutedEventArgs e)
+    public void StartVoiceFromWidget() => Dispatcher.InvokeAsync(ToggleVoiceRecording);
+
+    private void ToggleVoiceRecording()
+    {
+        if (_isRecording) StopVoiceRecording();
+        else StartVoiceRecording();
+    }
+
+    private void StartVoiceRecording()
+    {
+        try
+        {
+            _audioStream = new MemoryStream();
+            _waveIn = new WaveInEvent { WaveFormat = new WaveFormat(16000, 1) };
+            _waveWriter = new WaveFileWriter(_audioStream, _waveIn.WaveFormat);
+            _waveIn.DataAvailable += (s, e) => _waveWriter?.Write(e.Buffer, 0, e.BytesRecorded);
+            _waveIn.RecordingStopped += OnRecordingStopped;
+            _waveIn.StartRecording();
+            _isRecording = true;
+            VoiceBtn.Content = "⏹";
+            VoiceBtn.ToolTip = "To'xtatish";
+            _miniWidget?.SetListening(true);
+            SetStatus("🔴 Yozib olinyapti...");
+        }
+        catch (Exception ex)
+        {
+            AddMessage(MessageRole.System, $"Mikrofon xatosi: {ex.Message}");
+        }
+    }
+
+    private void StopVoiceRecording()
+    {
+        _isRecording = false;
+        _waveIn?.StopRecording();
+    }
+
+    private async void OnRecordingStopped(object? s, StoppedEventArgs e)
+    {
+        _waveWriter?.Flush();
+        _waveWriter?.Dispose();
+        _waveIn?.Dispose();
+        _waveIn = null;
+
+        var bytes = _audioStream?.ToArray() ?? [];
+        _audioStream?.Dispose();
+        _audioStream = null;
+
+        await Dispatcher.InvokeAsync(async () =>
+        {
+            VoiceBtn.Content = "🎤";
+            VoiceBtn.ToolTip = "Ovozli buyruq";
+            _miniWidget?.SetListening(false);
+            SetStatus("Tayyor");
+
+            if (bytes.Length < 1000) return; // juda qisqa
+
+            var groqKey = _apiKeyStore.Get("groq");
+            if (string.IsNullOrEmpty(groqKey))
+            {
+                AddMessage(MessageRole.System, "⚠ Groq API key kerak. Model tanlab key kiriting.");
+                return;
+            }
+
+            SetStatus("🔊 Ovoz tanilmoqda...");
+            var text = await TranscribeWithGroqAsync(bytes, groqKey);
+            if (text.StartsWith("__ERR__"))
+            {
+                AddMessage(MessageRole.System, $"⚠ Ovoz tanishda xato: {text["__ERR__".Length..]}");
+            }
+            else if (!string.IsNullOrEmpty(text))
+            {
+                ChatInput.Text = text;
+                await SendMessage();
+            }
+            else
+            {
+                AddMessage(MessageRole.System, "⚠ Ovoz tanilmadi. Qayta urinib ko'ring.");
+            }
+            SetStatus("Tayyor");
+        });
+    }
+
+    private static async Task<string> TranscribeWithGroqAsync(byte[] wavBytes, string apiKey)
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+        using var form = new MultipartFormDataContent();
+        form.Add(new ByteArrayContent(wavBytes), "file", "audio.wav");
+        form.Add(new StringContent("whisper-large-v3-turbo"), "model");
+        form.Add(new StringContent("uz"), "language");
+        try
+        {
+            var resp = await http.PostAsync("https://api.groq.com/openai/v1/audio/transcriptions", form);
+            var json = await resp.Content.ReadAsStringAsync();
+            if (!resp.IsSuccessStatusCode)
+                return $"__ERR__HTTP {(int)resp.StatusCode}: {json}";
+            var doc  = JsonDocument.Parse(json);
+            return doc.RootElement.TryGetProperty("text", out var t) ? t.GetString() ?? "" : "";
+        }
+        catch (Exception ex) { return $"__ERR__{ex.Message}"; }
+    }
+
+    private static bool IsGroqModel(string m) =>
+        m.StartsWith("llama") || m.StartsWith("qwen-3") || m.StartsWith("mixtral") ||
+        m.StartsWith("gemma") || m.StartsWith("meta-llama");
+
+    // .env fayldan API keylarni avtomatik yuklash
+    private void LoadApiKeysFromEnv()
+    {
+        // Mumkin bo'lgan .env joylari
+        var envPaths = new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                         "dev-studio", ".env"),
+            @"C:\Users\Сomp X\dev-studio\.env",
+        };
+
+        foreach (var path in envPaths)
+        {
+            if (!File.Exists(path)) continue;
+            foreach (var line in File.ReadAllLines(path))
+            {
+                var parts = line.Split('=', 2);
+                if (parts.Length != 2) continue;
+                var key = parts[0].Trim();
+                var val = parts[1].Trim().Trim('"');
+                if (string.IsNullOrEmpty(val)) continue;
+
+                if (key == "GROQ_API_KEY")    _apiKeyStore.Set("groq",      val);
+                if (key == "DEEPSEEK_API_KEY") _apiKeyStore.Set("deepseek",  val);
+                if (key == "OPENAI_API_KEY")   _apiKeyStore.Set("openai",    val);
+            }
+            break;
+        }
+    }
+
+    private void Cancel_Click(object sender, RoutedEventArgs e)
     {
         _extApiCts?.Cancel();
+
+        // Fire-and-forget — await qilmaymiz, hub busy bo'lishi mumkin
         if (_hub?.State == HubConnectionState.Connected)
-            await _hub.InvokeAsync("CancelRequest", _sessionId);
+            _ = _hub.InvokeAsync("CancelRequest", _sessionId).ContinueWith(_ => { });
+
+        // Darhol UI ni qayta tiklash
+        if (_agentBubble != null)
+        {
+            _agentBubble.Finalize("Bekor qilindi", "");
+            _agentBubble = null;
+        }
+        _streamBubble = null;
+        _streamBuffer.Clear();
         SetBusy(false);
-        SetStatus("Bekor qilindi");
+        SetStatus("Tayyor");
     }
 
     private void Mode_Changed(object sender, RoutedEventArgs e)
@@ -1430,9 +1683,34 @@ public partial class MainWindow : Window
         SetStatus(_isAutoMode ? "Auto rejim" : "Ask rejim");
     }
 
+    private void AddComboHeader(string text)
+    {
+        ModelCombo.Items.Add(new ComboBoxItem
+        {
+            Content = text,
+            IsEnabled = false,
+            FontSize = 10,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = new SolidColorBrush(Color.FromRgb(0x6c, 0x70, 0x86)),
+            Padding = new Thickness(6, 4, 6, 2),
+            Margin = new Thickness(0, 4, 0, 0)
+        });
+    }
+
+    private void AddComboModel(string id, string? label = null)
+    {
+        ModelCombo.Items.Add(new ComboBoxItem
+        {
+            Content = label ?? id,
+            Tag = id,
+            FontSize = 11,
+            Padding = new Thickness(14, 3, 6, 3)
+        });
+    }
+
     private void ModelCombo_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (ModelCombo.SelectedItem is not string model) return;
+        if (ModelCombo.SelectedItem is not ComboBoxItem { IsEnabled: true, Tag: string model }) return;
         _currentModel = model;
 
         if (ExternalApiClient.IsExternalModel(model))
@@ -1448,9 +1726,21 @@ public partial class MainWindow : Window
             else
                 ApiKeyInput.Password = key; // to'ldirib qo'y (edit uchun)
         }
+        else if (IsGroqModel(model))
+        {
+            ProviderText.Text = $"Groq / {model}";
+            var groqKey = _apiKeyStore.Get("groq");
+            if (string.IsNullOrEmpty(groqKey))
+            {
+                ApiKeyProviderLabel.Text = "🔑 Groq API Kaliti (ovoz uchun)";
+                ShowApiKeyPopup();
+            }
+            else
+                ApiKeyPopup.IsOpen = false;
+        }
         else
         {
-            ProviderText.Text = $"ollama / {model}";
+            ProviderText.Text = $"local / {model}";
             ApiKeyPopup.IsOpen = false;
         }
     }
@@ -1465,12 +1755,20 @@ public partial class MainWindow : Window
     private void SaveApiKey_Click(object sender, RoutedEventArgs e)
     {
         var key = ApiKeyInput.Password.Trim();
-        if (!string.IsNullOrEmpty(key) && ExternalApiClient.IsExternalModel(_currentModel))
+        if (!string.IsNullOrEmpty(key))
         {
-            var provider = ExternalApiClient.ProviderLabel(_currentModel).ToLower();
-            _apiKeyStore.Set(provider, key);
-            AddMessage(MessageRole.System,
-                $"✓ {ExternalApiClient.ProviderLabel(_currentModel)} API kaliti saqlandi");
+            if (IsGroqModel(_currentModel))
+            {
+                _apiKeyStore.Set("groq", key);
+                AddMessage(MessageRole.System, "✓ Groq API kaliti saqlandi (ovoz uchun ishlatiladi)");
+            }
+            else if (ExternalApiClient.IsExternalModel(_currentModel))
+            {
+                var provider = ExternalApiClient.ProviderLabel(_currentModel).ToLower();
+                _apiKeyStore.Set(provider, key);
+                AddMessage(MessageRole.System,
+                    $"✓ {ExternalApiClient.ProviderLabel(_currentModel)} API kaliti saqlandi");
+            }
         }
         ApiKeyPopup.IsOpen = false;
     }
@@ -1483,12 +1781,20 @@ public partial class MainWindow : Window
         if (e.Key == Key.Return || e.Key == Key.Enter)
         {
             var key = ApiKeyInput.Password.Trim();
-            if (!string.IsNullOrEmpty(key) && ExternalApiClient.IsExternalModel(_currentModel))
+            if (!string.IsNullOrEmpty(key))
             {
-                var provider = ExternalApiClient.ProviderLabel(_currentModel).ToLower();
-                _apiKeyStore.Set(provider, key);
-                AddMessage(MessageRole.System,
-                    $"✓ {ExternalApiClient.ProviderLabel(_currentModel)} API kaliti saqlandi");
+                if (IsGroqModel(_currentModel))
+                {
+                    _apiKeyStore.Set("groq", key);
+                    AddMessage(MessageRole.System, "✓ Groq API kaliti saqlandi");
+                }
+                else if (ExternalApiClient.IsExternalModel(_currentModel))
+                {
+                    var provider = ExternalApiClient.ProviderLabel(_currentModel).ToLower();
+                    _apiKeyStore.Set(provider, key);
+                    AddMessage(MessageRole.System,
+                        $"✓ {ExternalApiClient.ProviderLabel(_currentModel)} API kaliti saqlandi");
+                }
             }
             ApiKeyPopup.IsOpen = false;
             e.Handled = true;
@@ -1570,6 +1876,7 @@ public partial class MainWindow : Window
         _sessionId = sessionId;
         MessagesPanel.Children.Clear();
         _streamBubble = null;
+        _agentBubble  = null;
         _streamBuffer.Clear();
 
         // Cache dan yoki DB dan yuklash
@@ -1709,6 +2016,61 @@ public partial class MainWindow : Window
 
     private void Minimize_Click(object sender, RoutedEventArgs e) =>
         WindowState = WindowState.Minimized;
+
+    private void OnStateChanged(object? sender, EventArgs e)
+    {
+        if (WindowState == WindowState.Minimized)
+            MinimizeToTray();
+    }
+
+    private void InitTrayIcon()
+    {
+        var iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "sodiq.ico");
+        _notifyIcon = new H.NotifyIcon.TaskbarIcon
+        {
+            ToolTipText  = "Windows Assistant",
+            Visibility   = Visibility.Collapsed,
+            IconSource   = File.Exists(iconPath)
+                           ? new System.Windows.Media.Imaging.BitmapImage(new Uri(iconPath))
+                           : null,
+        };
+
+        // Context menu
+        var ctxMenu = new ContextMenu();
+        var miOpen  = new MenuItem { Header = "Ochish" };
+        miOpen.Click += (s, e) => RestoreFromTray();
+        var miExit  = new MenuItem { Header = "Chiqish" };
+        miExit.Click += (s, e) =>
+        {
+            _notifyIcon.Visibility = Visibility.Collapsed;
+            Application.Current.Shutdown();
+        };
+        ctxMenu.Items.Add(miOpen);
+        ctxMenu.Items.Add(miExit);
+        _notifyIcon.ContextMenu = ctxMenu;
+        _notifyIcon.TrayMouseDoubleClick += (s, e) => RestoreFromTray();
+    }
+
+    private void MinimizeToTray()
+    {
+        Hide();
+        if (_notifyIcon != null) _notifyIcon.Visibility = Visibility.Visible;
+        if (_miniWidget != null && _miniWidget.IsVisible) return; // allaqachon bor
+        _miniWidget?.Close();
+        _miniWidget = new MiniWidget(this);
+        _miniWidget.Closed += (s, e) => _miniWidget = null;
+        _miniWidget.Show();
+    }
+
+    public void RestoreFromTray()
+    {
+        Show();
+        WindowState = WindowState.Normal;
+        Activate();
+        if (_notifyIcon != null) _notifyIcon.Visibility = Visibility.Collapsed;
+        _miniWidget?.Close();
+        _miniWidget = null;
+    }
 
     private void Maximize_Click(object sender, RoutedEventArgs e) =>
         WindowState = WindowState == WindowState.Maximized

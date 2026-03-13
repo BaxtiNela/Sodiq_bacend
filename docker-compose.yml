@@ -1,31 +1,6 @@
 services:
 
-  # ── llama-cpp-python server — RTX 2060 GPU accelerated ──
-  llama-server:
-    build:
-      context: .
-      dockerfile: Dockerfile.llm
-    container_name: wa-llm
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./models:/models
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/v1/models', timeout=5)"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
-
-  # ── WA Backend ──
+  # ── WA Backend — Groq API orqali Llama 4 Scout ──
   wa-backend:
     build:
       context: .
@@ -34,14 +9,12 @@ services:
     ports:
       - "5000:5000"
     environment:
-      - LLM_URL=http://llama-server:8080
+      - LLM_URL=https://api.groq.com/openai
+      - GROQ_API_KEY=${GROQ_API_KEY}
       - ConnectionStrings__Default=Data Source=/data/assistant.db
       - ASPNETCORE_URLS=http://+:5000
     volumes:
       - D:/WA-Data:/data
-    depends_on:
-      llama-server:
-        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:5000/health"]

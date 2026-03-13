@@ -82,6 +82,33 @@ public class ToolExecutor
     private static async Task<string> RunCmd(string command)
     {
         if (string.IsNullOrWhiteSpace(command)) return Err("Buyruq bo'sh");
+
+        // "start X" — GUI ilovalar yoki URL lar uchun UseShellExecute ishlatish kerak
+        var trimmed = command.TrimStart();
+        if (trimmed.StartsWith("start ", StringComparison.OrdinalIgnoreCase))
+        {
+            var target = trimmed[6..].Trim().Trim('"', '\'', ' ');
+            if (!string.IsNullOrEmpty(target))
+            {
+                // URL → brauzerda och
+                if (target.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                    target.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
+                        return $"✓ '{target}' brauzerda ochildi";
+                    }
+                    catch (Exception ex) { return Err($"URL ochishda xato: {ex.Message}"); }
+                }
+
+                // Ilova nomi → OpenApp mantiqidan foydalanish
+                var appResult = OpenApp(target);
+                if (!appResult.StartsWith("[Xato]")) return appResult;
+                // Xato bo'lsa — odatiy cmd start ga o'tamiz
+            }
+        }
+
         try
         {
             var psi = new ProcessStartInfo("cmd.exe", $"/c {command}")
@@ -277,23 +304,71 @@ public class ToolExecutor
     // DESKTOP BOSHQARUV
     // ══════════════════════════════════════════════════════════
 
+    private static readonly Dictionary<string, string> _appUriMap =
+        new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["telegram"]  = "tg://",
+        ["whatsapp"]  = "whatsapp://",
+        ["discord"]   = "discord://",
+        ["spotify"]   = "spotify:",
+        ["vscode"]    = "code",
+        ["vs code"]   = "code",
+    };
+
+    private static readonly Dictionary<string, string> _appPathMap =
+        new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["telegram"]  = @"%APPDATA%\Telegram Desktop\Telegram.exe",
+        ["chrome"]    = @"%ProgramFiles%\Google\Chrome\Application\chrome.exe",
+        ["firefox"]   = @"%ProgramFiles%\Mozilla Firefox\firefox.exe",
+        ["edge"]      = @"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
+        ["notepad++"] = @"%ProgramFiles%\Notepad++\notepad++.exe",
+    };
+
     private static string OpenApp(string appName)
     {
+        // 1. URI scheme (Telegram tg://, Spotify, Discord...)
+        if (_appUriMap.TryGetValue(appName, out var uri))
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true });
+                return $"✓ '{appName}' ochildi";
+            }
+            catch { }
+        }
+
+        // 2. Known install paths
+        if (_appPathMap.TryGetValue(appName, out var rawPath))
+        {
+            var exePath = Environment.ExpandEnvironmentVariables(rawPath);
+            if (File.Exists(exePath))
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo(exePath) { UseShellExecute = true });
+                    return $"✓ '{appName}' ochildi";
+                }
+                catch { }
+            }
+        }
+
+        // 3. Windows Shell (PATH + App Paths registry)
         try
         {
             Process.Start(new ProcessStartInfo(appName) { UseShellExecute = true });
             return $"✓ '{appName}' ochildi";
         }
-        catch
+        catch { }
+
+        // 4. CMD start fallback
+        try
         {
-            try
-            {
-                Process.Start(new ProcessStartInfo("cmd.exe", $"/c start {appName}")
-                    { UseShellExecute = false, CreateNoWindow = true });
-                return $"✓ '{appName}' ishga tushirildi";
-            }
-            catch (Exception ex) { return Err(ex.Message); }
+            Process.Start(new ProcessStartInfo("cmd.exe", $"/c start \"\" \"{appName}\"")
+                { UseShellExecute = false, CreateNoWindow = true });
+            return $"✓ '{appName}' ishga tushirildi";
         }
+        catch (Exception ex) { return Err(ex.Message); }
     }
 
     private static async Task<string> TakeScreenshot(string? filename)

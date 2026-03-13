@@ -1,0 +1,55 @@
+<Window x:Class="WA.App.Views.MiniWidget"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Assistant" Width="210" Height="56"
+        WindowStyle="None" ResizeMode="NoResize"
+        AllowsTransparency="True" Background="Transparent"
+        Topmost="True" ShowInTaskbar="False"
+        WindowStartupLocation="Manual">
+    <Border Background="#CC1E1E2E" CornerRadius="28"
+            BorderBrush="#44FFFFFF" BorderThickness="1">
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="48"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="36"/>
+                <ColumnDefinition Width="30"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- AI icon → asosiy oynani ochish -->
+            <Border Grid.Column="0" Width="36" Height="36"
+                    Background="#FF6C5CE7" CornerRadius="18"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Cursor="Hand" MouseLeftButtonUp="Icon_Click"
+                    ToolTip="Asosiy oynani ochish">
+                <TextBlock x:Name="StatusIcon" Text="🤖" FontSize="16"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+
+            <!-- Status -->
+            <TextBlock Grid.Column="1" x:Name="StatusLabel"
+                       Text="Tayyor" Foreground="#DDDDDD"
+                       FontSize="11" VerticalAlignment="Center"
+                       HorizontalAlignment="Left" Margin="4,0,0,0"/>
+
+            <!-- Mic button -->
+            <Button Grid.Column="2" x:Name="MicBtn"
+                    Width="28" Height="28"
+                    Background="Transparent" BorderThickness="0"
+                    FontSize="15" Content="🎤"
+                    VerticalAlignment="Center" HorizontalAlignment="Center"
+                    Cursor="Hand" Click="Mic_Click"
+                    ToolTip="Ovoz bilan gapiring"/>
+
+            <!-- X — faqat widgetni yopish (ilova tray da qoladi) -->
+            <Button Grid.Column="3"
+                    Width="20" Height="20"
+                    Background="Transparent" BorderThickness="0"
+                    Foreground="#88FFFFFF" FontSize="12" Content="✕"
+                    VerticalAlignment="Top" HorizontalAlignment="Center"
+                    Margin="0,4,6,0"
+                    Cursor="Hand" Click="Close_Click"
+                    ToolTip="Yopish (ilova tray da qoladi)"/>
+        </Grid>
+    </Border>
+</Window>

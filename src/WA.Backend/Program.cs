@@ -20,7 +20,7 @@ builder.Services.AddSignalR(opt =>
     opt.KeepAliveInterval = TimeSpan.FromSeconds(30);
 });
 
-builder.Services.AddSingleton<OllamaBackendClient>();
+builder.Services.AddSingleton<LocalLlmClient>();
 builder.Services.AddScoped<MemoryBackendService>();
 builder.Services.AddScoped<ContextBuilderService>();
 builder.Services.AddScoped<LearningService>();

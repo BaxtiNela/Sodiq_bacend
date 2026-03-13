@@ -13,7 +13,7 @@ namespace WA.Backend.Hubs;
 /// </summary>
 public class AssistantHub(
     AppDbContext db,
-    OllamaBackendClient ollama,
+    LocalLlmClient ollama,
     ContextBuilderService ctxBuilder,
     MemoryBackendService memSvc,
     LearningService learner,
@@ -22,10 +22,13 @@ public class AssistantHub(
     private const int MaxRounds = 15;
 
     // Kutilayotgan tool result'lar: connectionId -> (callId -> TaskCompletionSource)
-    // ConcurrentDictionary — thread-safe, bir vaqtda bir nechta connection uchun xavfsiz
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<
         string, System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource<string>>>
         _pendingTools = new();
+
+    // Bekor qilish tokenlari: connectionId -> CancellationTokenSource
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, CancellationTokenSource>
+        _cancelTokens = new();
 
     // ═══════════════════════════════════════════════════════════════
     // CLIENT → SERVER
@@ -36,6 +39,11 @@ public class AssistantHub(
     {
         var connId = Context.ConnectionId;
         logger.LogInformation("[{Conn}] SendMessage: session={Session}", connId, sessionId);
+
+        // Yangi so'rov uchun CancellationTokenSource yaratish
+        var cts = new CancellationTokenSource();
+        _cancelTokens[connId] = cts;
+        var ct = cts.Token;
 
         try
         {
@@ -60,23 +68,29 @@ public class AssistantHub(
                 .Where(m => (m.Role == "user" || m.Role == "assistant")
                             && !string.IsNullOrEmpty(m.Content))
                 .TakeLast(12)
-                .Select(m => new OllamaMessage(m.Role,
+                .Select(m => new LlmMessage(m.Role,
                     m.Content.Length > 1500 ? m.Content[..1500] + "…" : m.Content))
                 .ToList();
 
             // System message boshida bo'lsin
-            var messages = new List<OllamaMessage> { systemMsg };
+            var messages = new List<LlmMessage> { systemMsg };
             messages.AddRange(history);
 
             var tools = GetAllTools();
             string finalResponse = string.Empty;
 
+            // Loop detection: bir xil tool+args ni 3 marta qaytarsa to'xtatamiz
+            string lastToolKey = string.Empty;
+            int lastToolRepeat = 0;
+
             // ── Agent loop ──
             for (int round = 0; round < MaxRounds; round++)
             {
+                ct.ThrowIfCancellationRequested();
+
                 await Clients.Caller.SendAsync("StatusUpdate", round == 0 ? "O'ylayapman..." : $"Davom etmoqda... ({round})");
 
-                var resp = await ollama.ChatAsync(messages, tools, model);
+                var resp = await ollama.ChatAsync(messages, tools, model, ct);
 
                 if (!resp.HasToolCalls)
                 {
@@ -87,18 +101,38 @@ public class AssistantHub(
                     break;
                 }
 
+                // ── Loop detection: bir xil tool+args 3 marta qaytarsa to'xtatish ──
+                var firstTc = resp.ToolCalls[0];
+                var currentKey = $"{firstTc.Name}|{firstTc.ArgsJson}";
+                if (currentKey == lastToolKey)
+                {
+                    lastToolRepeat++;
+                    if (lastToolRepeat >= 2)
+                    {
+                        finalResponse = $"Tool '{firstTc.Name}' bir necha marta qaytarildi. Natija olish mumkin emas.";
+                        await Clients.Caller.SendAsync("StreamToken", finalResponse);
+                        break;
+                    }
+                }
+                else
+                {
+                    lastToolKey = currentKey;
+                    lastToolRepeat = 0;
+                }
+
                 // Tool call'larni bajarish — assistant xabari tool_calls bilan
                 var tcJson = System.Text.Json.JsonSerializer.Serialize(
                     resp.ToolCalls.Select(t => new {
                         id = t.Id, type = "function",
                         function = new { name = t.Name, arguments = t.ArgsJson }
                     }));
-                messages.Add(new OllamaMessage("assistant", resp.Content ?? string.Empty,
+                messages.Add(new LlmMessage("assistant", resp.Content ?? string.Empty,
                     ToolCallsJson: tcJson));
 
                 foreach (var tc in resp.ToolCalls)
                 {
-                    var callId = Guid.NewGuid().ToString("N")[..8];
+                    var callId = tc.Id;
+                    if (string.IsNullOrEmpty(callId)) callId = Guid.NewGuid().ToString("N")[..8];
                     await Clients.Caller.SendAsync("StatusUpdate", $"Tool: {tc.Name}...");
 
                     // WPF ga tool bajarish so'rovi
@@ -107,11 +141,11 @@ public class AssistantHub(
                         _ => new System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource<string>>());
                     connPending[callId] = tcs;
 
-                    await Clients.Caller.SendAsync("ToolCallRequest", callId, tc.Name, tc.ArgsJson);
+                    await Clients.Caller.SendAsync("ToolCallRequest", tc.Id, tc.Name, tc.ArgsJson);
 
                     // 60 soniya kutish
-                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-                    cts.Token.Register(() => tcs.TrySetResult("[timeout]"));
+                    using var toolCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+                    toolCts.Token.Register(() => tcs.TrySetResult("[timeout]"));
 
                     var toolResult = await tcs.Task;
 
@@ -131,8 +165,13 @@ public class AssistantHub(
                     });
                     await db.SaveChangesAsync();
 
+                    // read_file dan keyin write_file ga yo'naltirish
+                    var toolMsg = toolResult;
+                    if (tc.Name == "read_file" && !toolResult.StartsWith("[Xato]"))
+                        toolMsg = toolResult + "\n\n[SYSTEM: Fayl o'qildi. Endi FAQAT write_file() chaqir va to'liq yangilangan kodni yoz. read_file() qayta chaqirma.]";
+
                     // Tool natijasini xabarlarga qo'shish (tool_call_id majburiy)
-                    messages.Add(new OllamaMessage("tool", toolResult, ToolCallId: tc.Id));
+                    messages.Add(new LlmMessage("tool", toolMsg, ToolCallId: tc.Id));
 
                     await Clients.Caller.SendAsync("ToolResult", tc.Name, toolResult[..Math.Min(500, toolResult.Length)]);
                 }
@@ -156,10 +195,20 @@ public class AssistantHub(
                 await learner.PruneOldMessagesAsync(conv.Id);
             });
         }
+        catch (OperationCanceledException)
+        {
+            logger.LogInformation("[{Conn}] SendMessage bekor qilindi", connId);
+            await Clients.Caller.SendAsync("FinalResponse", "", sessionId);
+        }
         catch (Exception ex)
         {
             logger.LogError(ex, "SendMessage error");
             await Clients.Caller.SendAsync("Error", $"Xato: {ex.Message}");
+        }
+        finally
+        {
+            _cancelTokens.TryRemove(connId, out _);
+            cts.Dispose();
         }
     }
 
@@ -203,21 +252,28 @@ public class AssistantHub(
     public Task CancelRequest(string sessionId)
     {
         var connId = Context.ConnectionId;
-        lock (_pendingTools)
+
+        // Asosiy agent loop ni to'xtatish
+        if (_cancelTokens.TryGetValue(connId, out var cts))
+            cts.Cancel();
+
+        // Kutilayotgan tool call'larni ham to'xtatish
+        if (_pendingTools.TryGetValue(connId, out var pending))
         {
-            if (_pendingTools.TryGetValue(connId, out var pending))
-            {
-                foreach (var tcs in pending.Values)
-                    tcs.TrySetResult("[cancelled]");
-                pending.Clear();
-            }
+            foreach (var tcs in pending.Values)
+                tcs.TrySetResult("[cancelled]");
+            pending.Clear();
         }
+
         return Task.CompletedTask;
     }
 
     public override Task OnDisconnectedAsync(Exception? exception)
     {
-        if (_pendingTools.TryRemove(Context.ConnectionId, out var pending))
+        var connId = Context.ConnectionId;
+        if (_cancelTokens.TryRemove(connId, out var cts))
+            cts.Cancel();
+        if (_pendingTools.TryRemove(connId, out var pending))
             foreach (var tcs in pending.Values)
                 tcs.TrySetResult("[disconnected]");
         return base.OnDisconnectedAsync(exception);

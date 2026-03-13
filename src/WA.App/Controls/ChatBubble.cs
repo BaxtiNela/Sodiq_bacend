@@ -1,7 +1,10 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using Markdig;
+using Markdig.Wpf;
 
 namespace WA.App.Controls;
 
@@ -16,6 +19,7 @@ public class ChatBubble : Border
 
     // Streaming uchun — mavjud assistant TextBox ga token qo'shish
     private TextBox? _mainBox;
+    private MarkdownViewer? _mdViewer;
 
     public ChatBubble(MessageRole role, string text, string? model = null)
     {
@@ -95,11 +99,22 @@ public class ChatBubble : Border
         header.Children.Add(cpyBtn);
         outer.Children.Add(header);
 
-        // Message text (selectable)
-        _mainBox = MakeReadOnlyBox(text,
-            app?.FindResource("Brush.Text.Primary") as Brush ?? Brushes.White,
-            13, lineHeight: 21);
-        outer.Children.Add(_mainBox);
+        // Message text (selectable, using Markdig.Wpf)
+        var pipeline = new Markdig.MarkdownPipelineBuilder()
+            .UseAdvancedExtensions()
+            .Build();
+
+        _mdViewer = new MarkdownViewer
+        {
+            Pipeline = pipeline,
+            Markdown = text,
+            Margin = new Thickness(0, 4, 0, 0)
+        };
+        // Apply text styling rules for FlowDocument
+        TextElement.SetForeground(_mdViewer, app?.FindResource("Brush.Text.Primary") as Brush ?? Brushes.White);
+        TextElement.SetFontSize(_mdViewer, 13);
+        
+        outer.Children.Add(_mdViewer);
 
         Child = outer;
     }
@@ -146,9 +161,11 @@ public class ChatBubble : Border
     // ── Streaming ─────────────────────────────────────────────────────
     public void AppendText(string token)
     {
-        if (_mainBox == null) return;
         CachedText += token;
-        _mainBox.AppendText(token);
+        if (_mainBox != null)
+            _mainBox.AppendText(token);
+        if (_mdViewer != null)
+            _mdViewer.Markdown = CachedText ?? string.Empty;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────
